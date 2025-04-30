@@ -1285,3 +1285,436 @@ class IronManAR:
         visibility = self.helmet_deployment_progress > 0.1
         
         # Update all helmet components
+        for component in self.helmet_components:
+            component.visible = visibility
+            component.position = Vec3(face_x, face_y, face_z)
+            component.rotation = Vec3(face_pitch, face_yaw, face_tilt)
+            
+            # Apply alpha for deployment animation
+            if hasattr(component, 'color') and hasattr(component.color, 'a'):
+                r, g, b = component.color.r, component.color.g, component.color.b
+                component.color = color.rgba(r, g, b, alpha)
+        
+        # Scale helmet components
+        self.helmet_base.scale = Vec3(3 * width_scale, 3 * height_scale, 3 * width_scale)
+        self.face_plate.scale = Vec3(2.8 * width_scale, 2.8 * height_scale, 0.5)
+        self.helmet_crest.scale = Vec3(0.5 * width_scale, 0.8 * height_scale, 0.5)
+        self.left_ear.scale = Vec3(0.2 * width_scale, 0.3 * height_scale, 0.2)
+        self.right_ear.scale = Vec3(0.2 * width_scale, 0.3 * height_scale, 0.2)
+        
+        # Update eye glow effect
+        glow_pulse = math.sin(time.time() * 5) * 0.1
+        eye_glow_scale = 0.25 + glow_pulse
+        
+        self.left_eye_glow.scale = Vec3(eye_glow_scale * width_scale, eye_glow_scale * height_scale, 0.1)
+        self.left_eye_glow.color = color.rgba(30, 225, 255, min(200, 50 + int(150 * self.helmet_deployment_progress)))
+        
+        self.right_eye_glow.scale = Vec3(eye_glow_scale * width_scale, eye_glow_scale * height_scale, 0.1)
+        self.right_eye_glow.color = color.rgba(30, 225, 255, min(200, 50 + int(150 * self.helmet_deployment_progress)))
+
+    def update_chest_model(self):
+        """Update chest model position and animation based on pose tracking"""
+        if not self.pose_landmarks:
+            # Hide chest components when pose is not visible
+            for component in self.chest_components:
+                component.visible = False
+            return
+        
+        # Calculate chest position using shoulder landmarks
+        left_shoulder = self.pose_landmarks.landmark[11]
+        right_shoulder = self.pose_landmarks.landmark[12]
+        chest_center = self.pose_landmarks.landmark[0]  # Nose as reference for depth
+        
+        # Calculate position
+        chest_x = ((left_shoulder.x + right_shoulder.x) / 2 - 0.5) * 20
+        chest_y = (0.5 - (left_shoulder.y + right_shoulder.y) / 2) * 20 - 2  # Offset to place correctly
+        chest_z = -5 - (chest_center.z * 10) - 2  # Offset to place behind the head
+        
+        # Calculate chest dimensions
+        shoulder_width = abs(right_shoulder.x - left_shoulder.x) * 20
+        width_scale = max(0.8, min(1.5, shoulder_width / 6))
+        
+        # Calculate chest rotation (if both shoulders visible)
+        chest_roll = 0
+        if left_shoulder and right_shoulder:
+            dx = right_shoulder.x - left_shoulder.x
+            dy = right_shoulder.y - left_shoulder.y
+            chest_roll = math.degrees(math.atan2(dy, dx))
+        
+        # Apply deployment animation
+        alpha = int(255 * self.chest_deployment_progress)
+        visibility = self.chest_deployment_progress > 0.1
+        
+        # Update all chest components
+        for component in self.chest_components:
+            component.visible = visibility
+            component.position = Vec3(chest_x, chest_y, chest_z)
+            component.rotation = Vec3(0, 0, chest_roll)
+            
+            # Apply alpha for deployment animation
+            if hasattr(component, 'color') and hasattr(component.color, 'a'):
+                r, g, b = component.color.r, component.color.g, component.color.b
+                component.color = color.rgba(r, g, b, alpha)
+        
+        # Scale chest components
+        self.chest_plate.scale = Vec3(width_scale, width_scale, width_scale)
+        self.left_shoulder.scale = Vec3(0.8 * width_scale, 0.8 * width_scale, 0.8 * width_scale)
+        self.right_shoulder.scale = Vec3(0.8 * width_scale, 0.8 * width_scale, 0.8 * width_scale)
+        
+        # Update arc reactor glow
+        glow_pulse = math.sin(time.time() * 3) * 0.1
+        arc_glow_scale = 0.5 + glow_pulse
+        
+        self.arc_reactor_glow.scale = Vec3(arc_glow_scale * width_scale, arc_glow_scale * width_scale, 0.2)
+        self.arc_reactor_glow.color = color.rgba(30, 225, 255, min(200, 50 + int(150 * self.chest_deployment_progress)))
+
+    def update_repulsor_particles(self):
+        """Update repulsor particle effects"""
+        # Only show particles when repulsor is charging
+        if self.repulsor_charge_level > 10 and self.palm_glow.visible:
+            # Create new particles at the palm position
+            for _ in range(int(self.repulsor_charge_level / 20)):
+                if random.random() < 0.5:  # Randomly create particles
+                    # Get palm position
+                    palm_pos = Vec3(
+                        self.palm_glow.x,
+                        self.palm_glow.y,
+                        self.palm_glow.z - 0.1
+                    )
+                    
+                    # Create a particle
+                    particle = Entity(
+                        model='sphere',
+                        color=color.rgba(30, 225, 255, 150),
+                        scale=0.05,
+                        position=palm_pos,
+                        billboard=True
+                    )
+                    
+                    # Add random velocity
+                    velocity = Vec3(
+                        random.uniform(-0.1, 0.1),
+                        random.uniform(-0.1, 0.1),
+                        random.uniform(-0.2, -0.4)
+                    )
+                    
+                    # Add to particles list with lifespan and velocity
+                    self.particles.append({
+                        'entity': particle,
+                        'velocity': velocity,
+                        'life': 1.0  # 1 second lifespan
+                    })
+        
+        # Update existing particles
+        particles_to_remove = []
+        for particle in self.particles:
+            # Update position
+            particle['entity'].position += particle['velocity'] * time.dt
+            
+            # Update life
+            particle['life'] -= time.dt
+            
+            # Update scale and alpha based on life
+            life_ratio = particle['life']
+            particle['entity'].scale = Vec3(0.05 * life_ratio, 0.05 * life_ratio, 0.05 * life_ratio)
+            particle['entity'].color = color.rgba(30, 225, 255, int(150 * life_ratio))
+            
+            # Mark for removal if expired
+            if particle['life'] <= 0:
+                particles_to_remove.append(particle)
+        
+        # Remove expired particles
+        for particle in particles_to_remove:
+            if particle['entity'] in scene.entities:
+                destroy(particle['entity'])
+            self.particles.remove(particle)
+
+    def update_hud(self):
+        """Update HUD elements based on tracking and system status"""
+        # Show targeting reticle if hand is visible and in repulsor pose
+        if self.hand_landmarks and self.repulsor_charge_level > 0:
+            self.targeting_reticle.visible = True
+            self.crosshair_h.visible = True
+            self.crosshair_v.visible = True
+            
+            # Position reticle in front of palm
+            if self.palm_glow.visible:
+                reticle_x = self.palm_glow.x + (math.sin(time.time() * 5) * 0.05)
+                reticle_y = self.palm_glow.y + (math.cos(time.time() * 5) * 0.05)
+                reticle_z = self.palm_glow.z - 3
+                
+                self.targeting_reticle.position = Vec3(reticle_x, reticle_y, reticle_z)
+                self.crosshair_h.position = Vec3(reticle_x, reticle_y, reticle_z)
+                self.crosshair_v.position = Vec3(reticle_x, reticle_y, reticle_z)
+                
+                # Scale based on distance
+                scale_factor = 0.5 + (self.repulsor_charge_level / 200)
+                self.targeting_reticle.scale = Vec3(scale_factor, scale_factor, 1)
+                self.crosshair_h.scale = Vec3(scale_factor * 2, 0.05, 1)
+                self.crosshair_v.scale = Vec3(0.05, scale_factor * 2, 1)
+        else:
+            self.targeting_reticle.visible = False
+            self.crosshair_h.visible = False
+            self.crosshair_v.visible = False
+        
+        # Show data panel if all tracking is active
+        if self.hand_landmarks and self.face_landmarks and self.pose_landmarks:
+            self.data_panel.visible = True
+            
+            # Update data panel information
+            # (In a full implementation, this would update Text entities with system status)
+        else:
+            self.data_panel.visible = False
+
+    def process_gestures(self):
+        """Process hand gestures to control the system"""
+        if not self.hand_landmarks:
+            return
+        
+        # Detect repulsor gesture (open palm with fingers extended)
+        is_palm_open = self.detect_open_palm()
+        
+        # Update repulsor charge level based on gesture
+        if is_palm_open:
+            self.repulsor_charge_level = min(100, self.repulsor_charge_level + 2)
+        else:
+            self.repulsor_charge_level = max(0, self.repulsor_charge_level - 5)
+        
+        # Detect helmet deployment gesture (closed fist near face)
+        if self.detect_fist() and self.face_landmarks:
+            # Calculate distance between fist and face
+            hand_pos = self.hand_landmarks.landmark[9]  # Middle finger base
+            face_pos = self.face_landmarks.landmark[4]  # Nose tip
+            
+            distance = math.sqrt(
+                (hand_pos.x - face_pos.x)**2 + 
+                (hand_pos.y - face_pos.y)**2 + 
+                (hand_pos.z - face_pos.z)**2
+            )
+            
+            if distance < 0.15:  # Close to face
+                self.helmet_deployment_progress = min(1.0, self.helmet_deployment_progress + 0.05)
+            else:
+                self.helmet_deployment_progress = max(0.0, self.helmet_deployment_progress - 0.02)
+        else:
+            self.helmet_deployment_progress = max(0.0, self.helmet_deployment_progress - 0.01)
+        
+        # Detect chest deployment gesture (both hands on chest)
+        if self.pose_landmarks and self.hand_landmarks:
+            # Check if hand is near chest
+            hand_pos = self.hand_landmarks.landmark[0]  # Wrist
+            chest_pos = self.pose_landmarks.landmark[0]  # Nose (approximation)
+            
+            distance = math.sqrt(
+                (hand_pos.x - chest_pos.x)**2 + 
+                (hand_pos.y - chest_pos.y)**2 + 
+                (hand_pos.z - chest_pos.z)**2
+            )
+            
+            if distance < 0.3:  # Close to chest
+                self.chest_deployment_progress = min(1.0, self.chest_deployment_progress + 0.05)
+            else:
+                self.chest_deployment_progress = max(0.0, self.chest_deployment_progress - 0.02)
+        else:
+            self.chest_deployment_progress = max(0.0, self.chest_deployment_progress - 0.01)
+
+    def detect_open_palm(self):
+        """Detect if hand is in open palm position for repulsor"""
+        if not self.hand_landmarks:
+            return False
+        
+        # Check finger extension
+        landmarks = self.hand_landmarks.landmark
+        
+        # Check if fingers are extended
+        fingerTips = [4, 8, 12, 16, 20]
+        fingerIPs = [3, 7, 11, 15, 19]  # Intermediate points
+        fingerMPs = [2, 6, 10, 14, 18]  # Base points
+        
+        # Check if fingers are extended
+        fingers_extended = 0
+        for tip, ip, mp in zip(fingerTips, fingerIPs, fingerMPs):
+            # Calculate vectors
+            vec1 = Vec3(
+                landmarks[ip].x - landmarks[mp].x,
+                landmarks[ip].y - landmarks[mp].y,
+                landmarks[ip].z - landmarks[mp].z
+            )
+            
+            vec2 = Vec3(
+                landmarks[tip].x - landmarks[ip].x,
+                landmarks[tip].y - landmarks[ip].y,
+                landmarks[tip].z - landmarks[ip].z
+            )
+            
+            # Check if finger is extended (vectors aligned)
+            dot_product = vec1.dot(vec2)
+            vec1_len = vec1.length()
+            vec2_len = vec2.length()
+            
+            if vec1_len > 0 and vec2_len > 0:
+                alignment = dot_product / (vec1_len * vec2_len)
+                if alignment > 0.7:  # Aligned = extended
+                    fingers_extended += 1
+        
+        # Return true if at least 4 fingers are extended
+        return fingers_extended >= 4
+
+    def detect_fist(self):
+        """Detect closed fist gesture"""
+        if not self.hand_landmarks:
+            return False
+        
+        # Check finger flexion (opposite of extension)
+        landmarks = self.hand_landmarks.landmark
+        
+        # Check if fingers are curled
+        fingerTips = [4, 8, 12, 16, 20]
+        fingerPIPs = [3, 7, 11, 15, 19]  # Second joint
+        fingerMCPs = [2, 6, 10, 14, 18]  # Base points
+        
+        # Count curled fingers
+        fingers_curled = 0
+        for tip, pip, mcp in zip(fingerTips, fingerPIPs, fingerMCPs):
+            # Calculate vectors
+            vec1 = Vec3(
+                landmarks[pip].x - landmarks[mcp].x,
+                landmarks[pip].y - landmarks[mcp].y,
+                landmarks[pip].z - landmarks[mcp].z
+            )
+            
+            vec2 = Vec3(
+                landmarks[tip].x - landmarks[pip].x,
+                landmarks[tip].y - landmarks[pip].y,
+                landmarks[tip].z - landmarks[pip].z
+            )
+            
+            # Check if finger is curled (vectors perpendicular or opposite)
+            dot_product = vec1.dot(vec2)
+            vec1_len = vec1.length()
+            vec2_len = vec2.length()
+            
+            if vec1_len > 0 and vec2_len > 0:
+                alignment = dot_product / (vec1_len * vec2_len)
+                if alignment < 0.3:  # Perpendicular or opposite = curled
+                    fingers_curled += 1
+        
+        # Return true if at least 4 fingers are curled
+        return fingers_curled >= 4
+
+    def camera_callback(self, frame):
+        """Callback function for camera frame"""
+        if frame is None:
+            return
+        
+        # Convert frame to RGB for MediaPipe
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        
+        # Process hands
+        hand_results = self.hands.process(rgb_frame)
+        if hand_results.multi_hand_landmarks:
+            self.hand_landmarks = hand_results.multi_hand_landmarks[0]  # Use first hand
+            
+            # Calculate hand dimensions
+            landmarks = self.hand_landmarks.landmark
+            min_x, max_x = float('inf'), float('-inf')
+            min_y, max_y = float('inf'), float('-inf')
+            
+            for lm in landmarks:
+                min_x = min(min_x, lm.x)
+                max_x = max(max_x, lm.x)
+                min_y = min(min_y, lm.y)
+                max_y = max(max_y, lm.y)
+            
+            width = (max_x - min_x) * frame.shape[1]
+            length = (max_y - min_y) * frame.shape[0]
+            
+            self.hand_dimensions = {
+                'width': width,
+                'length': length
+            }
+        else:
+            self.hand_landmarks = None
+        
+        # Process face mesh
+        face_results = self.face_mesh.process(rgb_frame)
+        if face_results.multi_face_landmarks:
+            self.face_landmarks = face_results.multi_face_landmarks[0]  # Use first face
+            
+            # Calculate face dimensions
+            landmarks = self.face_landmarks.landmark
+            min_x, max_x = float('inf'), float('-inf')
+            min_y, max_y = float('inf'), float('-inf')
+            
+            for lm in landmarks:
+                min_x = min(min_x, lm.x)
+                max_x = max(max_x, lm.x)
+                min_y = min(min_y, lm.y)
+                max_y = max(max_y, lm.y)
+            
+            width = (max_x - min_x) * frame.shape[1]
+            height = (max_y - min_y) * frame.shape[0]
+            
+            self.face_dimensions = {
+                'width': width,
+                'height': height
+            }
+        else:
+            self.face_landmarks = None
+        
+        # Process pose
+        pose_results = self.pose.process(rgb_frame)
+        if pose_results.pose_landmarks:
+            self.pose_landmarks = pose_results.pose_landmarks
+        else:
+            self.pose_landmarks = None
+        
+        # Process gestures
+        self.process_gestures()
+        
+        # Store frame for display
+        self.frame = frame
+        self.frame_ready = True
+
+    def start_camera(self):
+        """Initialize and start camera capture"""
+        self.cap = cv2.VideoCapture(0)
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+        
+        # Start camera thread
+        self.camera_thread = threading.Thread(target=self.camera_loop)
+        self.camera_thread.daemon = True
+        self.camera_thread.start()
+
+    def camera_loop(self):
+        """Main camera capture loop"""
+        while True:
+            ret, frame = self.cap.read()
+            if ret:
+                self.camera_callback(frame)
+            time.sleep(0.01)  # Small delay to reduce CPU usage
+
+    def cleanup(self):
+        """Clean up resources on exit"""
+        if hasattr(self, 'cap') and self.cap:
+            self.cap.release()
+
+
+# Main program entry point
+if __name__ == "__main__":
+    # Initialize Ursina app
+    app = Ursina()
+    
+    # Create Iron Man AR interface
+    iron_man_ar = IronManARInterface()
+    
+    # Start camera capture
+    iron_man_ar.start_camera()
+    
+    # Register cleanup handler
+    import atexit
+    atexit.register(iron_man_ar.cleanup)
+    
+    # Run the app
+    app.run()
