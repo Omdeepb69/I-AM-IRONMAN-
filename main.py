@@ -5,6 +5,8 @@ import math
 from ursina import *
 import time
 import threading
+from ursina.mesh_importer import *
+import random
 
 class IronManAR:
     def __init__(self):
@@ -13,18 +15,19 @@ class IronManAR:
         self.mp_face_mesh = mp.solutions.face_mesh
         self.mp_drawing = mp.solutions.drawing_utils
         
-        # Initialize hand tracking
+        # Initialize hand tracking with improved parameters
         self.hands = self.mp_hands.Hands(
             max_num_hands=1,
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5
+            min_detection_confidence=0.7,
+            min_tracking_confidence=0.7
         )
         
-        # Initialize face tracking
+        # Initialize face tracking with improved parameters
         self.face_mesh = self.mp_face_mesh.FaceMesh(
             max_num_faces=1,
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5
+            min_detection_confidence=0.7,
+            min_tracking_confidence=0.7,
+            refine_landmarks=True  # Enable refined landmarks for better eye/lip tracking
         )
         
         # Camera setup
@@ -41,8 +44,29 @@ class IronManAR:
         # Animation states
         self.gauntlet_deployed = False
         self.helmet_deployed = False
+        self.chest_deployed = False
         self.deployment_progress = 0
+        self.helmet_deployment_progress = 0
         self.last_gesture = None
+        self.gesture_cooldown = 0  # Cooldown timer to prevent rapid toggling
+        
+        # Repulsor states
+        self.repulsor_charging = False
+        self.repulsor_charge_level = 0
+        self.repulsor_blast_active = False
+        self.repulsor_blast_timer = 0
+        self.repulsor_particles = []
+        
+        # Sound effects (represented by visual indicators)
+        self.sound_indicators = []
+        
+        # HUD elements
+        self.hud_elements = []
+        
+        # Colors
+        self.iron_man_red = color.rgb(210, 50, 40)
+        self.iron_man_gold = color.rgb(255, 215, 0)
+        self.repulsor_blue = color.rgb(30, 225, 255)
         
         # Threading setup for concurrent video capture and 3D rendering
         self.is_running = True
@@ -77,9 +101,11 @@ class IronManAR:
                 self.calculate_hand_dimensions(self.hand_landmarks, rgb_frame.shape)
                 self.detect_hand_gesture(self.hand_landmarks)
                 
-                # Draw hand landmarks for debugging
+                # Draw hand landmarks for debugging (can be disabled in production)
                 self.mp_drawing.draw_landmarks(
-                    frame, self.hand_landmarks, self.mp_hands.HAND_CONNECTIONS)
+                    frame, self.hand_landmarks, self.mp_hands.HAND_CONNECTIONS,
+                    mp.solutions.drawing_styles.get_default_hand_landmarks_style(),
+                    mp.solutions.drawing_styles.get_default_hand_connections_style())
             else:
                 self.hand_landmarks = None
             
@@ -93,16 +119,60 @@ class IronManAR:
                 connections = mp.solutions.face_mesh_connections.FACEMESH_CONTOURS
                 self.mp_drawing.draw_landmarks(
                     frame, self.face_landmarks, connections,
-                    landmark_drawing_spec=None)
+                    landmark_drawing_spec=mp.solutions.drawing_utils.DrawingSpec(
+                        color=(0, 255, 0), thickness=1, circle_radius=1))
             else:
                 self.face_landmarks = None
             
             # Update animation state based on gestures
             self.update_animation_states()
             
+            # Add HUD elements to frame
+            self.add_hud_to_frame(frame)
+            
             # Make the processed frame available to the main thread
             self.frame = frame
             self.frame_ready = True
+            
+    def add_hud_to_frame(self, frame):
+        """Add HUD elements to the frame for visual feedback"""
+        # Add gesture recognition status
+        if self.last_gesture:
+            cv2.putText(frame, f"Gesture: {self.last_gesture}", (20, 50), 
+                      cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        
+        # Add deployment status indicators
+        status_y = 80
+        if self.gauntlet_deployed:
+            cv2.putText(frame, "Gauntlet: ACTIVE", (20, status_y), 
+                      cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        else:
+            cv2.putText(frame, "Gauntlet: STANDBY", (20, status_y), 
+                      cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+        status_y += 30
+        
+        if self.helmet_deployed:
+            cv2.putText(frame, "Helmet: ACTIVE", (20, status_y), 
+                      cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        else:
+            cv2.putText(frame, "Helmet: STANDBY", (20, status_y), 
+                      cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+        status_y += 30
+        
+        if self.chest_deployed:
+            cv2.putText(frame, "Chest: ACTIVE", (20, status_y), 
+                      cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        else:
+            cv2.putText(frame, "Chest: STANDBY", (20, status_y), 
+                      cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+        
+        # Add repulsor charge level indicator if charging
+        if self.repulsor_charging and self.repulsor_charge_level > 0:
+            charge_width = int(200 * (self.repulsor_charge_level / 100))
+            cv2.rectangle(frame, (20, 170), (20 + charge_width, 190), (30, 225, 255), -1)
+            cv2.rectangle(frame, (20, 170), (220, 190), (255, 255, 255), 2)
+            cv2.putText(frame, f"REPULSOR: {int(self.repulsor_charge_level)}%", (30, 185), 
+                      cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
             
     def calculate_hand_dimensions(self, landmarks, frame_shape):
         """Calculate key hand dimensions from landmarks"""
@@ -149,8 +219,8 @@ class IronManAR:
         return math.sqrt((point1[0] - point2[0])**2 + (point1[1] - point2[1])**2)
     
     def detect_hand_gesture(self, landmarks):
-        """Detect gestures to trigger suit deployment"""
-        if not landmarks:
+        """Detect gestures to trigger suit deployment and actions"""
+        if not landmarks or self.gesture_cooldown > 0:
             return
             
         # Get finger states (extended/closed)
@@ -161,14 +231,121 @@ class IronManAR:
             if self.last_gesture != "fist":
                 self.last_gesture = "fist"
                 self.gauntlet_deployed = not self.gauntlet_deployed
+                self.gesture_cooldown = 30  # ~1 second at 30fps
         
         # Detect "peace" gesture to deploy helmet
         elif finger_states == [0, 1, 1, 0, 0]:  # Index and middle extended
             if self.last_gesture != "peace":
                 self.last_gesture = "peace"
                 self.helmet_deployed = not self.helmet_deployed
+                self.gesture_cooldown = 30
+        
+        # Detect "thumbs up" gesture to deploy chest piece
+        elif finger_states == [1, 0, 0, 0, 0]:  # Only thumb extended
+            if self.last_gesture != "thumbs_up":
+                self.last_gesture = "thumbs_up"
+                self.chest_deployed = not self.chest_deployed
+                self.gesture_cooldown = 30
+        
+        # Detect "repulsor charge" gesture (palm open with fingers together)
+        elif finger_states == [0, 1, 1, 1, 1]:  # All fingers except thumb extended
+            self.last_gesture = "repulsor_charge"
+            self.repulsor_charging = True
+            if self.repulsor_charge_level < 100:
+                self.repulsor_charge_level += 2
+        
+        # Detect "repulsor fire" gesture (only index finger extended like pointing)
+        elif finger_states == [0, 1, 0, 0, 0] and self.repulsor_charge_level > 30:
+            if self.last_gesture != "repulsor_fire":
+                self.last_gesture = "repulsor_fire"
+                self.repulsor_blast_active = True
+                self.repulsor_blast_timer = 15  # ~0.5 second blast
+                self.gesture_cooldown = 20
+                # Create repulsor blast particles
+                self.create_repulsor_blast()
         else:
-            self.last_gesture = None
+            self.repulsor_charging = False
+            if self.repulsor_charge_level > 0:
+                self.repulsor_charge_level -= 1
+    
+    def create_repulsor_blast(self):
+        """Create particle effect for repulsor blast"""
+        if not self.hand_landmarks:
+            return
+            
+        # Reset particles list
+        self.repulsor_particles = []
+        
+        # Get palm position
+        palm_x = (self.hand_landmarks.landmark[0].x - 0.5) * 20
+        palm_y = (0.5 - self.hand_landmarks.landmark[0].y) * 20
+        palm_z = -5 - (self.hand_landmarks.landmark[0].z * 10)
+        
+        # Create particles emanating from palm
+        num_particles = int(30 + (self.repulsor_charge_level / 100) * 50)
+        
+        for _ in range(num_particles):
+            # Calculate random direction vector (mostly forward)
+            direction = Vec3(
+                random.uniform(-0.3, 0.3),
+                random.uniform(-0.3, 0.3),
+                random.uniform(-1.5, -0.8)
+            )
+            
+            # Normalize and scale by random velocity
+            velocity = direction.normalized() * random.uniform(0.3, 1.0)
+            
+            # Create particle
+            particle = Entity(
+                model='sphere',
+                color=self.repulsor_blue, 
+                position=Vec3(palm_x, palm_y, palm_z - 0.8),
+                scale=random.uniform(0.05, 0.15),
+                shader=lit_with_shadows_shader,
+                always_on_top=True,
+            )
+            
+            # Store particle with its velocity
+            self.repulsor_particles.append({
+                'entity': particle,
+                'velocity': velocity,
+                'life': random.uniform(0.5, 1.5)
+            })
+        
+        # Reset charge level after blast
+        self.repulsor_charge_level = max(0, self.repulsor_charge_level - 30)
+    
+    def update_repulsor_particles(self):
+        """Update repulsor blast particles movement and lifespan"""
+        particles_to_remove = []
+        
+        for particle in self.repulsor_particles:
+            # Move particle
+            particle['entity'].position += particle['velocity']
+            
+            # Decrease life
+            particle['life'] -= time.dt
+            
+            # Fade out based on remaining life
+            alpha = min(255, int(255 * particle['life']))
+            particle['entity'].color = color.rgba(
+                self.repulsor_blue.r, 
+                self.repulsor_blue.g, 
+                self.repulsor_blue.b, 
+                alpha / 255
+            )
+            
+            # Gradually decrease scale
+            particle['entity'].scale *= 0.97
+            
+            # Mark for removal if expired
+            if particle['life'] <= 0:
+                particles_to_remove.append(particle)
+        
+        # Remove expired particles
+        for particle in particles_to_remove:
+            destroy(particle['entity'])
+            self.repulsor_particles.remove(particle)
     
     def get_finger_states(self, landmarks):
         """Determine if each finger is extended (1) or closed (0)"""
@@ -202,17 +379,34 @@ class IronManAR:
     
     def update_animation_states(self):
         """Update animation states based on detected gestures"""
-        # Update deployment progress for animations
+        # Update cooldown timer
+        if self.gesture_cooldown > 0:
+            self.gesture_cooldown -= 1
+        
+        # Update deployment progress for gauntlet animations
         if self.gauntlet_deployed and self.deployment_progress < 1.0:
             self.deployment_progress += 0.05
         elif not self.gauntlet_deployed and self.deployment_progress > 0:
             self.deployment_progress -= 0.05
         
+        # Update deployment progress for helmet animations
+        if self.helmet_deployed and self.helmet_deployment_progress < 1.0:
+            self.helmet_deployment_progress += 0.05
+        elif not self.helmet_deployed and self.helmet_deployment_progress > 0:
+            self.helmet_deployment_progress -= 0.05
+        
+        # Update repulsor blast timer
+        if self.repulsor_blast_timer > 0:
+            self.repulsor_blast_timer -= 1
+        else:
+            self.repulsor_blast_active = False
+        
         # Clamp values
         self.deployment_progress = max(0, min(1.0, self.deployment_progress))
+        self.helmet_deployment_progress = max(0, min(1.0, self.helmet_deployment_progress))
     
     def setup_ursina_engine(self):
-        """Initialize the Ursina game engine and 3D models"""
+        """Initialize the Ursina game engine and build detailed 3D models"""
         # Initialize Ursina app
         self.app = Ursina()
         
@@ -222,76 +416,17 @@ class IronManAR:
         self.camera.rotation = (0, 0, 0)
         
         # Set up lighting
-        self.light = DirectionalLight()
-        self.light.position = (3, 5, -10)
-        self.light.look_at(Vec3(0, 0, 0))
+        self.main_light = DirectionalLight()
+        self.main_light.position = (3, 5, -10)
+        self.main_light.look_at(Vec3(0, 0, 0))
         
-        # Create Iron Man hand model
-        self.gauntlet = Entity(
-            model='cube',
-            color=color.red,
-            scale=(2, 0.5, 1.5),
-            position=(0, 0, 0),
-            shader=lit_with_shadows_shader
-        )
+        # Additional point light for highlights
+        self.highlight_light = PointLight()
+        self.highlight_light.position = (0, 0, -8)
+        self.highlight_light.color = color.rgb(255, 255, 255)
+        self.highlight_light.intensity = 0.7
         
-        # Finger components
-        self.fingers = []
-        for i in range(5):
-            finger = Entity(
-                model='cube',
-                color=color.red,
-                scale=(0.2, 0.8, 0.2),
-                position=(0.7 - i * 0.35, 1, 0),
-                shader=lit_with_shadows_shader
-            )
-            self.fingers.append(finger)
-        
-        # Palm repulsor
-        self.palm_repulsor = Entity(
-            model='sphere',
-            color=color.cyan,
-            scale=(0.3, 0.1, 0.3),
-            position=(0, 0, -0.8),
-            shader=lit_with_shadows_shader
-        )
-        
-        # Create Iron Man helmet model
-        self.helmet = Entity(
-            model='sphere',
-            color=color.red,
-            scale=(2, 2.5, 2),
-            position=(0, 5, 0),
-            shader=lit_with_shadows_shader
-        )
-        
-        # Face plate
-        self.face_plate = Entity(
-            model='cube',
-            color=color.red,
-            scale=(1.8, 1.2, 0.5),
-            position=(0, 5, -1),
-            shader=lit_with_shadows_shader
-        )
-        
-        # Eye slits
-        self.left_eye = Entity(
-            model='cube',
-            color=color.cyan,
-            scale=(0.5, 0.2, 0.1),
-            position=(-0.5, 5.3, -1.3),
-            shader=lit_with_shadows_shader
-        )
-        
-        self.right_eye = Entity(
-            model='cube',
-            color=color.cyan,
-            scale=(0.5, 0.2, 0.1),
-            position=(0.5, 5.3, -1.3),
-            shader=lit_with_shadows_shader
-        )
-        
-        # Create a video texture for background
+        # Create video texture for background
         self.video_texture = Entity(
             model='quad',
             scale=(16, 9),
@@ -299,8 +434,590 @@ class IronManAR:
             texture=Texture(np.zeros((720, 1280, 3), dtype=np.uint8))
         )
         
+        # Create Iron Man gauntlet components
+        self.create_gauntlet_model()
+        
+        # Create Iron Man helmet components
+        self.create_helmet_model()
+        
+        # Create chest piece
+        self.create_chest_model()
+        
+        # Create HUD elements
+        self.create_hud_elements()
+        
         # Set up update function
         self.app.run()
+    
+    def create_gauntlet_model(self):
+        """Create detailed Iron Man gauntlet model using mesh generation"""
+        # Main hand plate (palm and back of hand)
+        self.gauntlet_base = Entity(
+            model=Mesh(vertices=[
+                Vec3(-1, -0.3, 0.8),  # Bottom left back
+                Vec3(1, -0.3, 0.8),   # Bottom right back
+                Vec3(1, 0.3, 0.8),    # Top right back
+                Vec3(-1, 0.3, 0.8),   # Top left back
+                Vec3(-0.8, -0.4, -0.8),  # Bottom left front
+                Vec3(0.8, -0.4, -0.8),   # Bottom right front
+                Vec3(0.8, 0.4, -0.8),    # Top right front
+                Vec3(-0.8, 0.4, -0.8),   # Top left front
+            ], triangles=[
+                0, 1, 2, 0, 2, 3,  # Back face
+                4, 5, 6, 4, 6, 7,  # Front face
+                0, 3, 7, 0, 7, 4,  # Left face
+                1, 5, 6, 1, 6, 2,  # Right face
+                3, 2, 6, 3, 6, 7,  # Top face
+                0, 1, 5, 0, 5, 4,  # Bottom face
+            ]),
+            color=self.iron_man_red,
+            scale=(2, 0.5, 1.5),
+            position=(0, 0, 0),
+            shader=lit_with_shadows_shader
+        )
+        
+        # Wrist armor piece
+        self.wrist_armor = Entity(
+            model=Mesh(vertices=[
+                Vec3(-1.2, -0.4, 1.2),  # Bottom left
+                Vec3(1.2, -0.4, 1.2),   # Bottom right
+                Vec3(1.2, 0.4, 1.2),    # Top right
+                Vec3(-1.2, 0.4, 1.2),   # Top left
+                Vec3(-1, -0.3, 0.8),  # Connect to hand
+                Vec3(1, -0.3, 0.8),
+                Vec3(1, 0.3, 0.8),
+                Vec3(-1, 0.3, 0.8),
+            ], triangles=[
+                0, 1, 2, 0, 2, 3,  # Outer face
+                4, 5, 6, 4, 6, 7,  # Inner face
+                0, 3, 7, 0, 7, 4,  # Left face
+                1, 5, 6, 1, 6, 2,  # Right face
+                3, 2, 6, 3, 6, 7,  # Top face
+                0, 1, 5, 0, 5, 4,  # Bottom face
+            ]),
+            color=self.iron_man_red,
+            scale=(2, 0.5, 1.5),
+            position=(0, 0, 0),
+            shader=lit_with_shadows_shader
+        )
+        
+        # Gold accent trim pieces
+        self.wrist_trim = Entity(
+            model='torus',
+            color=self.iron_man_gold,
+            scale=(1.2, 1.2, 0.1),
+            position=(0, 0, 1.25),
+            rotation=(90, 0, 0),
+            shader=lit_with_shadows_shader
+        )
+        
+        # Create fingers with joint segments
+        self.fingers = []
+        self.finger_joints = []
+        
+        # Create detailed fingers with joints
+        for i in range(5):
+            finger_segments = []
+            
+            # Three segments per finger
+            for j in range(3):
+                length = 0.8 - (j * 0.15)  # Decreasing length for each segment
+                
+                # Finger segment
+                segment = Entity(
+                    model=Mesh(vertices=[
+                        Vec3(-0.1, 0, 0),          # Base left
+                        Vec3(0.1, 0, 0),           # Base right
+                        Vec3(0.08, 0, -length),    # Tip right
+                        Vec3(-0.08, 0, -length),   # Tip left
+                        Vec3(0, 0.1, 0),           # Base top
+                        Vec3(0, 0.1, -length),     # Tip top
+                        Vec3(0, -0.1, 0),          # Base bottom
+                        Vec3(0, -0.1, -length),    # Tip bottom
+                    ], triangles=[
+                        0, 1, 4, 1, 4, 6,  # Base
+                        2, 3, 5, 3, 5, 7,  # Tip
+                        0, 3, 4, 3, 4, 5,  # Left
+                        1, 2, 6, 2, 6, 7,  # Right
+                        4, 5, 6, 5, 6, 7,  # Top
+                        0, 1, 3, 1, 3, 2,  # Bottom
+                    ]),
+                    color=self.iron_man_red,
+                    shader=lit_with_shadows_shader
+                )
+                
+                # Gold joint connector
+                joint = Entity(
+                    model='sphere',
+                    color=self.iron_man_gold,
+                    scale=(0.12, 0.12, 0.12),
+                    shader=lit_with_shadows_shader
+                )
+                
+                finger_segments.append(segment)
+                if j > 0:  # No joint at base of finger
+                    self.finger_joints.append(joint)
+            
+            self.fingers.append(finger_segments)
+        
+        # Palm repulsor
+        self.palm_repulsor_outer = Entity(
+            model='circle',
+            color=self.iron_man_gold,
+            scale=(0.4, 0.4, 0.01),
+            position=(0, 0, -0.8),
+            shader=lit_with_shadows_shader
+        )
+        
+        self.palm_repulsor_inner = Entity(
+            model='circle',
+            color=self.repulsor_blue,
+            scale=(0.3, 0.3, 0.01),
+            position=(0, 0, -0.81),
+            shader=lit_with_shadows_shader
+        )
+        
+        # Repulsor light effects
+        self.palm_glow = Entity(
+            model='sphere',
+            color=color.rgba(30, 225, 255, 100),
+            scale=(0.3, 0.3, 0.1),
+            position=(0, 0, -0.85),
+            shader=lit_with_shadows_shader
+        )
+        
+        # Knuckle armor plates
+        self.knuckle_plates = []
+        for i in range(4):  # Skip thumb
+            plate = Entity(
+                model=Mesh(vertices=[
+                    Vec3(-0.15, 0, 0),   # Base left
+                    Vec3(0.15, 0, 0),    # Base right
+                    Vec3(0.1, 0, -0.3),  # Tip right
+                    Vec3(-0.1, 0, -0.3), # Tip left
+                    Vec3(0, 0.1, 0),     # Base top
+                    Vec3(0, 0.08, -0.3), # Tip top
+                ], triangles=[
+                    0, 1, 4,  # Base
+                    2, 3, 5,  # Tip
+                    0, 3, 4, 3, 4, 5,  # Left
+                    1, 2, 4, 2, 4, 5,  # Right
+                    0, 1, 3, 1, 3, 2,  # Bottom
+                ]),
+                color=self.iron_man_gold,
+                shader=lit_with_shadows_shader
+            )
+            self.knuckle_plates.append(plate)
+    
+    def create_helmet_model(self):
+        """Create detailed Iron Man helmet model using mesh generation"""
+        # Main helmet shell
+        self.helmet_base = Entity(
+            model=Mesh(vertices=[
+                # Bottom face vertices
+                Vec3(-1.2, -1.0, 0),    # Bottom left back
+                Vec3(1.2, -1.0, 0),     # Bottom right back
+                Vec3(1.0, -0.8, -1.5),  # Bottom right front
+                Vec3(-1.0, -0.8, -1.5), # Bottom left front
+                
+                # Middle face vertices
+                Vec3(-1.3, 0, 0.3),     # Middle left back
+                Vec3(1.3, 0, 0.3),      # Middle right back
+                Vec3(1.1, 0, -1.7),     # Middle right front
+                Vec3(-1.1, 0, -1.7),    # Middle left front
+                
+                # Top face vertices
+                Vec3(-1.0, 1.2, 0),     # Top left back
+                Vec3(1.0, 1.2, 0),      # Top right back
+                Vec3(0.8, 1.0, -1.3),   # Top right front
+                Vec3(-0.8, 1.0, -1.3),  # Top left front
+            ], triangles=[
+                # Bottom face
+                0, 1, 2, 0, 2, 3,
+                
+                # Middle left face
+                0, 3, 7, 0, 7, 4,
+                
+                # Middle right face
+                1, 5, 6, 1, 6, 2,
+                
+                # Middle front face
+                3, 2, 6, 3, 6, 7,
+                
+                # Middle back face
+                0, 4, 5, 0, 5, 1,
+                
+                # Top left face
+                4, 7, 11, 4, 11, 8,
+                
+                # Top right face
+                5, 9, 10, 5, 10, 6,
+                
+                # Top front face
+                7, 6, 10, 7, 10, 11,
+                
+                # Top back face
+                4, 8, 9, 4, 9, 5,
+                
+                # Top face
+                8, 11, 10, 8, 10, 9,
+            ]),
+            color=self.iron_man_red,
+            shader=lit_with_shadows_shader
+        )
+        
+        # Face plate
+        self.face_plate = Entity(
+            model=Mesh(vertices=[
+                Vec3(-1.0, -0.7, -1.5),  # Bottom left
+                Vec3(1.0, -0.7, -1.5),   # Bottom right
+                Vec3(0.9, 0.7, -1.6),    # Top right
+                Vec3(-0.9, 0.7, -1.6),   # Top left
+                Vec3(-0.8, -0.5, -1.8),  # Inner bottom left
+                Vec3(0.8, -0.5, -1.8),   # Inner bottom right
+                Vec3(0.7, 0.5, -1.9),    # Inner top right
+                Vec3(-0.7, 0.5, -1.9),   # Inner top left
+            ], triangles=[
+                0, 1, 5, 0, 5, 4,  # Bottom face
+                1, 2, 6, 1, 6, 5,  # Right face
+                2, 3, 7, 2, 7, 6,  # Top face
+                3, 0, 4, 3, 4, 7,  # Left face
+                4, 5, 6, 4, 6, 7,  # Inner face
+            ]),
+            color=self.iron_man_gold,
+            shader=lit_with_shadows_shader
+        )
+        
+        # Eye slits with glowing effect
+        self.left_eye = Entity(
+            model=Mesh(vertices=[
+                Vec3(-0.8, 0.2, -1.81),  # Bottom left
+                Vec3(-0.5, 0.2, -1.81),  # Bottom right
+                Vec3(-0.45, 0.4, -1.81), # Top right
+                Vec3(-0.75, 0.4, -1.81), # Top left
+            ], triangles=[
+                0, 1, 2, 0, 2, 3,  # Eye slit face
+            ]),
+            color=self.repulsor_blue,
+            shader=lit_with_shadows_shader
+        )
+        
+        self.right_eye = Entity(
+            model=Mesh(vertices=[
+                Vec3(0.5, 0.2, -1.81),   # Bottom left
+                Vec3(0.8, 0.2, -1.81),   # Bottom right
+                Vec3(0.75, 0.4, -1.81),  # Top right
+                Vec3(0.45, 0.4, -1.81),  # Top left
+            ], triangles=[
+                0, 1, 2, 0, 2, 3,  # Eye slit face
+            ]),
+            color=self.repulsor_blue,
+            shader=lit_with_shadows_shader
+        )
+        
+        # Eye glow effects
+        self.left_eye_glow = Entity(
+            model='quad',
+            color=color.rgba(30, 225, 255, 150),
+            scale=(0.3, 0.2, 0.1),
+            position=(-0.65, 0.3, -1.85),
+            billboard=True,  # Always face camera
+            shader=lit_with_shadows_shader
+        )
+        
+        self.right_eye_glow = Entity(
+            model='quad',
+            color=color.rgba(30, 225, 255, 150),
+            scale=(0.3, 0.2, 0.1),
+            position=(0.65, 0.3, -1.85),
+            billboard=True,  # Always face camera
+            shader=lit_with_shadows_shader
+        )
+        
+        # Helmet details - ridges and panels
+        self.helmet_crest = Entity(
+            model=Mesh(vertices=[
+                Vec3(0, 1.2, -0.2),    # Top center
+                Vec3(-0.2, 0.8, -0.3),  # Left
+                Vec3(0.2, 0.8, -0.3),   # Right
+                Vec3(0, 0.7, -1.0),     # Front
+            ], triangles=[
+                0, 1, 3,  # Left panel
+                0, 3, 2,  # Right panel
+                0, 2, 1,  # Back panel
+            ]),
+            color=self.iron_man_red,
+            shader=lit_with_shadows_shader
+        )
+        
+        # Ear pieces
+        self.left_ear = Entity(
+            model='sphere',
+            color=self.iron_man_red,
+            scale=(0.2, 0.3, 0.2),
+            position=(-1.3, 0, -0.2),
+            shader=lit_with_shadows_shader
+        )
+        
+        self.right_ear = Entity(
+            model='sphere',
+            color=self.iron_man_red,
+            scale=(0.2, 0.3, 0.2),
+            position=(1.3, 0, -0.2),
+            shader=lit_with_shadows_shader
+        )
+        
+        # Jaw line details
+        self.jaw_detail = Entity(
+            model=Mesh(vertices=[
+                Vec3(-1.0, -0.8, -0.2),  # Left back
+                Vec3(1.0, -0.8, -0.2),   # Right back
+                Vec3(0.9, -0.8, -1.3),   # Right front
+                Vec3(-0.9, -0.8, -1.3),  # Left front
+                Vec3(-1.0, -1.0, -0.2),  # Left back bottom
+                Vec3(1.0, -1.0, -0.2),   # Right back bottom
+                Vec3(0.9, -1.0, -1.3),   # Right front bottom
+                Vec3(-0.9, -1.0, -1.3),  # Left front bottom
+            ], triangles=[
+                0, 1, 2, 0, 2, 3,  # Top
+                4, 5, 6, 4, 6, 7,  # Bottom
+                0, 3, 7, 0, 7, 4,  # Left
+                1, 5, 6, 1, 6, 2,  # Right
+                3, 2, 6, 3, 6, 7,  # Front
+                0, 1, 5, 0, 5, 4,  # Back
+            ]),
+            color=self.iron_man_gold,
+            shader=lit_with_shadows_shader
+        )
+        
+        # Group all helmet components
+        self.helmet_components = [
+            self.helmet_base, self.face_plate, 
+            self.left_eye, self.right_eye,
+            self.left_eye_glow, self.right_eye_glow,
+            self.helmet_crest, self.left_ear, self.right_ear,
+            self.jaw_detail
+        ]
+    
+    def create_chest_model(self):
+        """Create Iron Man chest piece model"""
+        # Main chest plate
+        self.chest_plate = Entity(
+            model=Mesh(vertices=[
+                # Front face vertices
+                Vec3(-2.0, -1.5, -1.0),  # Bottom left
+                Vec3(2.0, -1.5, -1.0),   # Bottom right
+                Vec3(2.5, 1.5, -1.0),    # Top right
+                Vec3(-2.5, 1.5, -1.0),   # Top left
+                
+                # Back face vertices (slightly curved)
+                Vec3(-1.8, -1.3, -2.0),  # Bottom left
+                Vec3(1.8, -1.3, -2.0),   # Bottom right
+                Vec3(2.3, 1.7, -2.0),    # Top right
+                Vec3(-2.3, 1.7, -2.0),   # Top left
+            ], triangles=[
+                # Front face
+                0, 1, 2, 0, 2, 3,
+                
+                # Back face
+                4, 7, 6, 4, 6, 5,
+                
+                # Left face
+                0, 3, 7, 0, 7, 4,
+                
+                # Right face
+                1, 5, 6, 1, 6, 2,
+                
+                # Top face
+                3, 2, 6, 3, 6, 7,
+                
+                # Bottom face
+                0, 4, 5, 0, 5, 1,
+            ]),
+            color=self.iron_man_red,
+            shader=lit_with_shadows_shader
+        )
+        
+        # Arc reactor
+        self.arc_reactor_outer = Entity(
+            model='circle',
+            color=self.iron_man_gold,
+            scale=(0.8, 0.8, 0.1),
+            position=(0, 0, -1.0),
+            shader=lit_with_shadows_shader
+        )
+        
+        self.arc_reactor_inner = Entity(
+            model='circle',
+            color=self.repulsor_blue,
+            scale=(0.6, 0.6, 0.1),
+            position=(0, 0, -0.95),
+            shader=lit_with_shadows_shader
+        )
+        
+        # Arc reactor glow
+        self.arc_reactor_glow = Entity(
+            model='sphere',
+            color=color.rgba(30, 225, 255, 150),
+            scale=(0.5, 0.5, 0.2),
+            position=(0, 0, -0.9),
+            shader=lit_with_shadows_shader
+        )
+        
+        # Shoulder pieces
+        self.left_shoulder = Entity(
+            model='sphere',
+            color=self.iron_man_red,
+            scale=(0.8, 0.8, 0.8),
+            position=(-2.5, 1.5, -1.5),
+            shader=lit_with_shadows_shader
+        )
+        
+        self.right_shoulder = Entity(
+            model='sphere',
+            color=self.iron_man_red,
+            scale=(0.8, 0.8, 0.8),
+            position=(2.5, 1.5, -1.5),
+            shader=lit_with_shadows_shader
+        )
+        
+        # Chest detail lines (gold trim)
+        self.chest_details = Entity(
+            model=Mesh(vertices=[
+                # Left detail
+                Vec3(-1.5, 0.5, -0.95),  # Top
+                Vec3(-1.0, -1.0, -0.95), # Bottom
+                Vec3(-1.3, -1.0, -0.95), # Bottom wider
+                Vec3(-1.8, 0.5, -0.95),  # Top wider
+                
+                # Right detail (mirrored)
+                Vec3(1.5, 0.5, -0.95),   # Top
+                Vec3(1.0, -1.0, -0.95),  # Bottom
+                Vec3(1.3, -1.0, -0.95),  # Bottom wider
+                Vec3(1.8, 0.5, -0.95),   # Top wider
+            ], triangles=[
+                # Left detail
+                0, 1, 2, 0, 2, 3,
+                
+                # Right detail
+                4, 5, 6, 4, 6, 7,
+            ]),
+            color=self.iron_man_gold,
+            shader=lit_with_shadows_shader
+        )
+        
+        # Group all chest components
+        self.chest_components = [
+            self.chest_plate, self.arc_reactor_outer, 
+            self.arc_reactor_inner, self.arc_reactor_glow,
+            self.left_shoulder, self.right_shoulder,
+            self.chest_details
+        ]
+        
+        # Initially hide chest components
+        for component in self.chest_components:
+            component.visible = False
+    
+    def create_hud_elements(self):
+        """Create HUD interface elements"""
+        # Create targeting reticle
+        self.targeting_reticle = Entity(
+            model=Mesh(vertices=[
+                # Inner circle vertices
+                Vec3(0, 0, -5),             # Center
+                Vec3(0.2, 0, -5),           # Right
+                Vec3(0.14, 0.14, -5),       # Top right
+                Vec3(0, 0.2, -5),           # Top
+                Vec3(-0.14, 0.14, -5),      # Top left
+                Vec3(-0.2, 0, -5),          # Left
+                Vec3(-0.14, -0.14, -5),     # Bottom left
+                Vec3(0, -0.2, -5),          # Bottom
+                Vec3(0.14, -0.14, -5),      # Bottom right
+                
+                # Outer circle vertices
+                Vec3(0.3, 0, -5),           # Right
+                Vec3(0.21, 0.21, -5),       # Top right
+                Vec3(0, 0.3, -5),           # Top
+                Vec3(-0.21, 0.21, -5),      # Top left
+                Vec3(-0.3, 0, -5),          # Left
+                Vec3(-0.21, -0.21, -5),     # Bottom left
+                Vec3(0, -0.3, -5),          # Bottom
+                Vec3(0.21, -0.21, -5),      # Bottom right
+            ], triangles=[
+                # Inner circle segments
+                0, 1, 2,
+                0, 2, 3,
+                0, 3, 4, 
+                0, 4, 5,
+                0, 5, 6,
+                0, 6, 7,
+                0, 7, 8,
+                0, 8, 1,
+                
+                # Outer ring segments
+                1, 9, 10, 1, 10, 2,
+                2, 10, 11, 2, 11, 3,
+                3, 11, 12, 3, 12, 4,
+                4, 12, 13, 4, 13, 5,
+                5, 13, 14, 5, 14, 6,
+                6, 14, 15, 6, 15, 7,
+                7, 15, 16, 7, 16, 8,
+                8, 16, 9, 8, 9, 1,
+            ]),
+            color=self.repulsor_blue,
+            billboard=True,
+            shader=lit_with_shadows_shader,
+            visible=False  # Initially hidden
+        )
+        
+        # Add crosshair lines
+        self.crosshair_h = Entity(
+            model=Mesh(vertices=[
+                Vec3(-0.5, 0, -5),
+                Vec3(0.5, 0, -5),
+                Vec3(-0.5, 0.02, -5),
+                Vec3(0.5, 0.02, -5),
+            ], triangles=[
+                0, 1, 3, 0, 3, 2,
+            ]),
+            color=self.repulsor_blue,
+            billboard=True,
+            shader=lit_with_shadows_shader,
+            visible=False
+        )
+        
+        self.crosshair_v = Entity(
+            model=Mesh(vertices=[
+                Vec3(0, -0.5, -5),
+                Vec3(0, 0.5, -5),
+                Vec3(0.02, -0.5, -5),
+                Vec3(0.02, 0.5, -5),
+            ], triangles=[
+                0, 1, 3, 0, 3, 2,
+            ]),
+            color=self.repulsor_blue,
+            billboard=True,
+            shader=lit_with_shadows_shader,
+            visible=False
+        )
+        
+        # Data display panel
+        self.data_panel = Entity(
+            model='quad',
+            texture='white_cube',
+            color=color.rgba(0, 0, 0, 100),
+            scale=(3, 1.5, 1),
+            position=(5, 3, -5),
+            visible=False
+        )
+        
+        # Group HUD elements
+        self.hud_elements = [
+            self.targeting_reticle,
+            self.crosshair_h,
+            self.crosshair_v,
+            self.data_panel
+        ]
     
     def update(self):
         """Main update function for Ursina app"""
@@ -314,137 +1031,257 @@ class IronManAR:
             self.video_texture.texture = Texture(texture_data)
             self.frame_ready = False
         
-        # Update hand model position and scale based on hand tracking
-        if self.hand_landmarks:
-            # Position the gauntlet based on hand position
-            hand_x = (self.hand_landmarks.landmark[0].x - 0.5) * 20
-            hand_y = (0.5 - self.hand_landmarks.landmark[0].y) * 20
-            depth = -5 - (self.hand_landmarks.landmark[0].z * 10)
-            
-            # Apply hand dimensions to scale
-            width_scale = self.hand_dimensions['width'] / 200
-            length_scale = self.hand_dimensions['length'] / 200
-            
-            # Update gauntlet position and scale
-            self.gauntlet.position = (hand_x, hand_y, depth)
-            self.gauntlet.scale = (2 * width_scale, 0.5, 1.5 * length_scale)
-            
-            # Animate based on deployment state
-            if self.gauntlet_deployed:
-                # Make the model fully visible
-                self.gauntlet.color = color.rgba(200, 50, 50, 255)
-                for finger in self.fingers:
-                    finger.color = color.rgba(200, 50, 50, 255)
-                self.palm_repulsor.color = color.rgba(0, 255, 255, 255)
-            else:
-                # Make the model semi-transparent
-                self.gauntlet.color = color.rgba(200, 50, 50, 50)
-                for finger in self.fingers:
-                    finger.color = color.rgba(200, 50, 50, 50)
-                self.palm_repulsor.color = color.rgba(0, 255, 255, 50)
-            
-            # Update fingers
-            for i, finger in enumerate(self.fingers):
-                # Get finger base and tip landmarks
-                if i == 0:  # Thumb
-                    base_id = 2
-                    tip_id = 4
-                else:
-                    base_id = 5 + (i-1)*4
-                    tip_id = 8 + (i-1)*4
-                
-                base_x = (self.hand_landmarks.landmark[base_id].x - 0.5) * 20
-                base_y = (0.5 - self.hand_landmarks.landmark[base_id].y) * 20
-                tip_x = (self.hand_landmarks.landmark[tip_id].x - 0.5) * 20
-                tip_y = (0.5 - self.hand_landmarks.landmark[tip_id].y) * 20
-                
-                # Position at the middle of the finger
-                finger_x = (base_x + tip_x) / 2
-                finger_y = (base_y + tip_y) / 2
-                
-                # Calculate finger length and angle
-                dx = tip_x - base_x
-                dy = tip_y - base_y
-                finger_length = math.sqrt(dx**2 + dy**2)
-                finger_angle = math.degrees(math.atan2(dy, dx))
-                
-                # Update position and rotation
-                finger.position = (finger_x, finger_y, depth)
-                finger.rotation_z = finger_angle - 90
-                finger.scale = (0.2, finger_length, 0.2)
-            
-            # Update palm repulsor
-            self.palm_repulsor.position = (hand_x, hand_y, depth - 0.8)
-            
-            # Animate repulsor glow based on deployment
-            if self.gauntlet_deployed:
-                self.palm_repulsor.scale = (
-                    0.3 + math.sin(time.time() * 10) * 0.05,
-                    0.1,
-                    0.3 + math.sin(time.time() * 10) * 0.05
-                )
+        # Update repulsor particles
+        self.update_repulsor_particles()
         
-        # Update helmet position and scale based on face tracking
-        if self.face_landmarks:
-            # Calculate center of the face
-            nose_tip = self.face_landmarks.landmark[4]
-            face_x = (nose_tip.x - 0.5) * 20
-            face_y = (0.5 - nose_tip.y) * 20 + 2  # Offset to place helmet correctly
-            face_z = -5 - (nose_tip.z * 10)
-            
-            # Scale based on face dimensions
-            width_scale = self.face_dimensions['width'] / 200
-            height_scale = self.face_dimensions['height'] / 200
-            
-            # Update helmet position and scale
-            self.helmet.position = (face_x, face_y, face_z)
-            self.face_plate.position = (face_x, face_y, face_z - 1)
-            self.left_eye.position = (face_x - 0.5, face_y + 0.3, face_z - 1.3)
-            self.right_eye.position = (face_x + 0.5, face_y + 0.3, face_z - 1.3)
-            
-            # Scale helmet
-            self.helmet.scale = (2 * width_scale, 2.5 * height_scale, 2 * width_scale)
-            self.face_plate.scale = (1.8 * width_scale, 1.2 * height_scale, 0.5)
-            
-            # Animate based on deployment state
-            if self.helmet_deployed:
-                # Make the model fully visible
-                self.helmet.color = color.rgba(200, 50, 50, 255)
-                self.face_plate.color = color.rgba(200, 50, 50, 255)
-                self.left_eye.color = color.rgba(0, 255, 255, 255)
-                self.right_eye.color = color.rgba(0, 255, 255, 255)
-                
-                # Animate eye glow
-                glow = 0.5 + 0.5 * math.sin(time.time() * 5)
-                self.left_eye.scale = (0.5, 0.2, 0.1 + glow * 0.1)
-                self.right_eye.scale = (0.5, 0.2, 0.1 + glow * 0.1)
-            else:
-                # Make the model semi-transparent
-                self.helmet.color = color.rgba(200, 50, 50, 50)
-                self.face_plate.color = color.rgba(200, 50, 50, 50)
-                self.left_eye.color = color.rgba(0, 255, 255, 50)
-                self.right_eye.color = color.rgba(0, 255, 255, 50)
+        # Update hand model position and animation
+        self.update_hand_model()
+        
+        # Update helmet position and animation
+        self.update_helmet_model()
+        
+        # Update chest piece position and animation
+        self.update_chest_model()
+        
+        # Update HUD elements
+        self.update_hud()
     
-    def run(self):
-        """Run the main application loop"""
-        # Set up the update function
-        def update_wrapper():
-            self.update()
+    def update_hand_model(self):
+        """Update hand model position and animation based on tracking"""
+        if not self.hand_landmarks:
+            # Hide hand components when hand is not visible
+            self.gauntlet_base.visible = False
+            self.wrist_armor.visible = False
+            self.wrist_trim.visible = False
+            self.palm_repulsor_outer.visible = False
+            self.palm_repulsor_inner.visible = False
+            self.palm_glow.visible = False
+            
+            for segments in self.fingers:
+                for segment in segments:
+                    segment.visible = False
+            
+            for joint in self.finger_joints:
+                joint.visible = False
+                
+            for plate in self.knuckle_plates:
+                plate.visible = False
+                
+            return
         
-        self.app.update = update_wrapper
+        # Position the gauntlet based on hand position
+        hand_x = (self.hand_landmarks.landmark[0].x - 0.5) * 20
+        hand_y = (0.5 - self.hand_landmarks.landmark[0].y) * 20
+        hand_z = -5 - (self.hand_landmarks.landmark[0].z * 10)
         
-        try:
-            # Run the app
-            self.app.run()
-        finally:
-            # Clean up resources
-            self.is_running = False
-            self.cap.release()
-            self.hands.close()
-            self.face_mesh.close()
-            cv2.destroyAllWindows()
-
-if __name__ == "__main__":
-    # Create and run the application
-    iron_man_ar = IronManAR()
-    iron_man_ar.run()
+        # Apply hand dimensions to scale
+        width_scale = max(0.8, min(1.5, self.hand_dimensions['width'] / 200))
+        length_scale = max(0.8, min(1.5, self.hand_dimensions['length'] / 200))
+        
+        # Calculate hand rotation based on wrist and middle finger
+        wrist = self.hand_landmarks.landmark[0]
+        middle_base = self.hand_landmarks.landmark[9]
+        
+        # Calculate hand rotation
+        dx = middle_base.x - wrist.x
+        dy = middle_base.y - wrist.y
+        
+        hand_angle_y = math.degrees(math.atan2(dx, -dy))
+        hand_angle_x = math.degrees(math.atan2(wrist.z - middle_base.z, 
+                                            math.sqrt((middle_base.x - wrist.x)**2 + (middle_base.y - wrist.y)**2)))
+        
+        # Update main gauntlet components
+        alpha = int(255 * self.deployment_progress)
+        visibility = self.deployment_progress > 0.1
+        
+        self.gauntlet_base.visible = visibility
+        self.gauntlet_base.position = Vec3(hand_x, hand_y, hand_z)
+        self.gauntlet_base.rotation = Vec3(hand_angle_x, 0, hand_angle_y)
+        self.gauntlet_base.scale = Vec3(2 * width_scale, 0.5, 1.5 * length_scale)
+        self.gauntlet_base.color = color.rgba(self.iron_man_red.r, self.iron_man_red.g, self.iron_man_red.b, alpha)
+        
+        self.wrist_armor.visible = visibility
+        self.wrist_armor.position = Vec3(hand_x, hand_y, hand_z)
+        self.wrist_armor.rotation = Vec3(hand_angle_x, 0, hand_angle_y)
+        self.wrist_armor.scale = Vec3(2 * width_scale, 0.5, 1.5 * length_scale)
+        self.wrist_armor.color = color.rgba(self.iron_man_red.r, self.iron_man_red.g, self.iron_man_red.b, alpha)
+        
+        self.wrist_trim.visible = visibility
+        self.wrist_trim.position = Vec3(hand_x, hand_y, hand_z + 0.25)
+        self.wrist_trim.rotation = Vec3(90 + hand_angle_x, 0, hand_angle_y)
+        self.wrist_trim.scale = Vec3(1.2 * width_scale, 1.2 * width_scale, 0.1)
+        self.wrist_trim.color = color.rgba(self.iron_man_gold.r, self.iron_man_gold.g, self.iron_man_gold.b, alpha)
+        
+        # Update palm repulsors
+        self.palm_repulsor_outer.visible = visibility
+        self.palm_repulsor_outer.position = Vec3(hand_x, hand_y, hand_z - 0.8)
+        self.palm_repulsor_outer.rotation = Vec3(hand_angle_x, 0, hand_angle_y)
+        self.palm_repulsor_outer.scale = Vec3(0.4 * width_scale, 0.4 * width_scale, 0.01)
+        self.palm_repulsor_outer.color = color.rgba(self.iron_man_gold.r, self.iron_man_gold.g, self.iron_man_gold.b, alpha)
+        
+        self.palm_repulsor_inner.visible = visibility
+        self.palm_repulsor_inner.position = Vec3(hand_x, hand_y, hand_z - 0.81)
+        self.palm_repulsor_inner.rotation = Vec3(hand_angle_x, 0, hand_angle_y)
+        self.palm_repulsor_inner.scale = Vec3(0.3 * width_scale, 0.3 * width_scale, 0.01)
+        
+        # Make repulsor glow based on charge level
+        glow_intensity = 100 + int(155 * (self.repulsor_charge_level / 100))
+        self.palm_repulsor_inner.color = color.rgba(self.repulsor_blue.r, self.repulsor_blue.g, self.repulsor_blue.b, min(255, alpha + glow_intensity))
+        
+        # Update repulsor glow effect
+        glow_pulse = math.sin(time.time() * 10) * 0.1
+        glow_scale = 0.3 + glow_pulse + 0.3 * (self.repulsor_charge_level / 100)
+        
+        self.palm_glow.visible = visibility and self.repulsor_charge_level > 0
+        self.palm_glow.position = Vec3(hand_x, hand_y, hand_z - 0.85)
+        self.palm_glow.scale = Vec3(glow_scale * width_scale, glow_scale * width_scale, 0.1)
+        self.palm_glow.color = color.rgba(30, 225, 255, min(200, 50 + int(150 * (self.repulsor_charge_level / 100))))
+        
+        # Update fingers
+        for i, finger_segments in enumerate(self.fingers):
+            # Get finger base, middle, and tip landmarks
+            if i == 0:  # Thumb
+                base_id, middle_id, tip_id = 1, 2, 4
+            else:
+                base_id = 5 + (i-1)*4
+                middle_id = 6 + (i-1)*4
+                tip_id = 8 + (i-1)*4
+            
+            base = self.hand_landmarks.landmark[base_id]
+            middle = self.hand_landmarks.landmark[middle_id]
+            tip = self.hand_landmarks.landmark[tip_id]
+            
+            # Calculate segment positions in 3D space
+            base_pos = Vec3(
+                (base.x - 0.5) * 20, 
+                (0.5 - base.y) * 20, 
+                -5 - (base.z * 10)
+            )
+            
+            middle_pos = Vec3(
+                (middle.x - 0.5) * 20, 
+                (0.5 - middle.y) * 20, 
+                -5 - (middle.z * 10)
+            )
+            
+            tip_pos = Vec3(
+                (tip.x - 0.5) * 20, 
+                (0.5 - tip.y) * 20, 
+                -5 - (tip.z * 10)
+            )
+            
+            # Position segments along the finger
+            segment_positions = [
+                base_pos,
+                Vec3.lerp(base_pos, middle_pos, 0.67),
+                Vec3.lerp(middle_pos, tip_pos, 0.5)
+            ]
+            
+            # Direction vectors for each segment
+            directions = [
+                (middle_pos - base_pos).normalized(),
+                (middle_pos - base_pos).normalized(),
+                (tip_pos - middle_pos).normalized()
+            ]
+            
+            # Update each segment
+            for j, segment in enumerate(finger_segments):
+                pos = segment_positions[j]
+                dir_vec = directions[j]
+                
+                # Calculate segment rotation
+                up_vec = Vec3(0, 1, 0)
+                right_vec = up_vec.cross(dir_vec).normalized()
+                up_rot = right_vec.cross(dir_vec).normalized()
+                
+                # Convert direction to rotation angles
+                rot_matrix = Matrix44(
+                    right_vec.x, right_vec.y, right_vec.z, 0,
+                    up_rot.x, up_rot.y, up_rot.z, 0,
+                    dir_vec.x, dir_vec.y, dir_vec.z, 0,
+                    0, 0, 0, 1
+                )
+                
+                rotation = rot_matrix.get_euler_angles()
+                
+                # Update segment
+                segment.visible = visibility
+                segment.position = pos
+                segment.rotation = Vec3(rotation.x, rotation.y, rotation.z)
+                segment.color = color.rgba(self.iron_man_red.r, self.iron_man_red.g, self.iron_man_red.b, alpha)
+            
+            # Update finger joints
+            if i > 0:  # Skip thumb joints
+                knuckle_pos = Vec3.lerp(base_pos, middle_pos, 0.1)
+                middle_joint_pos = Vec3.lerp(base_pos, middle_pos, 0.67)
+                
+                # Update knuckle plate
+                self.knuckle_plates[i-1].visible = visibility
+                self.knuckle_plates[i-1].position = knuckle_pos
+                self.knuckle_plates[i-1].rotation = Vec3(rotation.x, rotation.y, rotation.z)
+                self.knuckle_plates[i-1].color = color.rgba(self.iron_man_gold.r, self.iron_man_gold.g, self.iron_man_gold.b, alpha)
+                
+                # Update middle joint
+                joint_index = (i-1) * 2
+                if joint_index < len(self.finger_joints):
+                    self.finger_joints[joint_index].visible = visibility
+                    self.finger_joints[joint_index].position = middle_joint_pos
+                    self.finger_joints[joint_index].color = color.rgba(self.iron_man_gold.r, self.iron_man_gold.g, self.iron_man_gold.b, alpha)
+                
+                # Update tip joint
+                tip_joint_pos = Vec3.lerp(middle_pos, tip_pos, 0.5)
+                if joint_index + 1 < len(self.finger_joints):
+                    self.finger_joints[joint_index + 1].visible = visibility
+                    self.finger_joints[joint_index + 1].position = tip_joint_pos
+                    self.finger_joints[joint_index + 1].color = color.rgba(self.iron_man_gold.r, self.iron_man_gold.g, self.iron_man_gold.b, alpha)
+    
+    def update_helmet_model(self):
+        """Update helmet model position and animation based on face tracking"""
+        if not self.face_landmarks:
+            # Hide helmet when face is not visible
+            for component in self.helmet_components:
+                component.visible = False
+            return
+        
+        # Calculate center of the face
+        nose_tip = self.face_landmarks.landmark[4]
+        face_x = (nose_tip.x - 0.5) * 20
+        face_y = (0.5 - nose_tip.y) * 20 + 2  # Offset to place helmet correctly
+        face_z = -5 - (nose_tip.z * 10)
+        
+        # Scale based on face dimensions
+        width_scale = max(0.8, min(1.5, self.face_dimensions['width'] / 200))
+        height_scale = max(0.8, min(1.5, self.face_dimensions['height'] / 200))
+        
+        # Calculate face rotation using landmarks
+        left_eye = self.face_landmarks.landmark[33]
+        right_eye = self.face_landmarks.landmark[263]
+        
+        # Calculate face tilt (roll)
+        dx = right_eye.x - left_eye.x
+        dy = right_eye.y - left_eye.y
+        face_tilt = math.degrees(math.atan2(dy, dx))
+        
+        # Calculate face yaw using nose and ear landmarks
+        nose_bridge = self.face_landmarks.landmark[168]
+        left_ear = self.face_landmarks.landmark[234]
+        right_ear = self.face_landmarks.landmark[454]
+        
+        left_dist = math.sqrt((nose_bridge.x - left_ear.x)**2 + (nose_bridge.z - left_ear.z)**2)
+        right_dist = math.sqrt((nose_bridge.x - right_ear.x)**2 + (nose_bridge.z - right_ear.z)**2)
+        
+        # Estimate yaw based on differential distance to ears
+        face_yaw = (right_dist - left_dist) * 45
+        
+        # Calculate face pitch using vertical landmarks
+        forehead = self.face_landmarks.landmark[10]
+        chin = self.face_landmarks.landmark[152]
+        
+        # Use z-difference for pitch
+        face_pitch = (nose_tip.z - forehead.z) * 100
+        
+        # Apply deployment animation
+        alpha = int(255 * self.helmet_deployment_progress)
+        visibility = self.helmet_deployment_progress > 0.1
+        
+        # Update all helmet components
