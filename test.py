@@ -1,562 +1,548 @@
-import cv2
-import mediapipe as mp
 import numpy as np
-import time
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
+from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+import matplotlib.animation as animation
+from matplotlib.colors import LinearSegmentedColormap
 import math
-from ursina import *
-from ursina.shaders import lit_with_shadows_shader
-from ursina.texture_importer import load_texture
+import random
 
-# Initialize MediaPipe
-mp_drawing = mp.solutions.drawing_utils
-mp_hands = mp.solutions.hands
-
-class RepulsorBlast(Entity):
-    def __init__(self, position, direction):
-        super().__init__(
-            model='sphere',
-            color=color.rgba(0, 200, 255, 200),
-            scale=0.2,
-            position=position,
-            collider='sphere',
-            add_to_scene_entities=False
-        )
-        self.direction = direction.normalized()
-        self.speed = 15
-        self.lifetime = 1.5
-        self.born = time.time()
-        
-        # Glow effect
-        self.glow = Entity(
-            parent=self,
-            model='sphere',
-            color=color.rgba(0, 150, 255, 100),
-            scale=1.5,
-            double_sided=True,
-            add_to_scene_entities=False
-        )
-        
-        # Trail particles
-        self.particles = []
-        for _ in range(30):
-            p = Entity(
-                model='sphere',
-                color=color.rgba(100, 200, 255, 150),
-                scale=random.uniform(0.05, 0.1),
-                position=position,
-                add_to_scene_entities=False
-            )
-            self.particles.append(p)
-
-    def update(self):
-        if not self.enabled:
-            return
-            
-        # Move blast forward
-        self.position += self.direction * self.speed * time.dt
-        
-        # Update glow
-        self.glow.position = self.position
-        self.glow.scale += Vec3(0.8, 0.8, 0.8) * time.dt
-        
-        # Update particles
-        for p in self.particles:
-            if random.random() < 0.3:
-                p.position = self.position
-            p.position += Vec3(
-                random.uniform(-1, 1),
-                random.uniform(-1, 1),
-                random.uniform(-1, 1)
-            ) * time.dt * 3
-            p.scale -= Vec3(0.03, 0.03, 0.03) * time.dt
-        
-        # Destroy after lifetime
-        if time.time() - self.born > self.lifetime:
-            self.enabled = False
-            self.glow.enabled = False
-            for p in self.particles:
-                p.enabled = False
-
-class IronManArm(Entity):
+class AccurateIronManHand:
     def __init__(self):
-        super().__init__()
+        # Iron Man specific colors - movie accurate
+        self.colors = {
+            'gold': [1.0, 0.843, 0.0],        # Bright gold
+            'red': [0.698, 0.133, 0.133],     # Deep red
+            'dark_red': [0.545, 0.0, 0.0],   # Dark red
+            'black': [0.1, 0.1, 0.1],        # Near black
+            'silver': [0.753, 0.753, 0.753], # Silver details
+            'blue_glow': [0.0, 0.749, 1.0],  # Arc reactor blue
+            'white': [1.0, 1.0, 1.0],        # White highlights
+            'gunmetal': [0.267, 0.267, 0.267] # Dark metallic
+        }
         
-        # Load metal textures
-        self.red_metal = load_texture('red_metal')
-        self.gold_metal = load_texture('gold_metal')
-        self.blue_energy = load_texture('blue_energy')
+        # Joint system for realistic movement
+        self.joints = {
+            'wrist_bend': 0,
+            'wrist_twist': 0,
+            'thumb': [0, 0, 0],    # 3 joints per finger
+            'index': [0, 0, 0],
+            'middle': [0, 0, 0],
+            'ring': [0, 0, 0],
+            'pinky': [0, 0, 0]
+        }
         
-        # Create arm hierarchy with proper transforms
-        self.upper_arm = Entity(
-            parent=self,
-            model='cube',
-            texture=self.red_metal,
-            color=color.rgb(200, 50, 50),
-            scale=(0.5, 1.2, 0.5),
-            position=(0, 0, 0),
-            rotation=(0, 0, 0),
-            shader=lit_with_shadows_shader
-        )
-        
-        # Shoulder joint
-        self.shoulder = Entity(
-            parent=self.upper_arm,
-            model='sphere',
-            texture=self.gold_metal,
-            color=color.gold,
-            scale=0.3,
-            position=(0, 0.6, 0),
-            shader=lit_with_shadows_shader
-        )
-        
-        # Elbow joint
-        self.elbow = Entity(
-            parent=self.upper_arm,
-            model='sphere',
-            texture=self.gold_metal,
-            color=color.gold,
-            scale=0.25,
-            position=(0, -0.6, 0),
-            shader=lit_with_shadows_shader
-        )
-        
-        self.forearm = Entity(
-            parent=self.elbow,
-            model='cube',
-            texture=self.red_metal,
-            color=color.rgb(200, 50, 50),
-            scale=(0.45, 1.1, 0.45),
-            position=(0, -0.55, 0),
-            rotation=(0, 0, 0),
-            shader=lit_with_shadows_shader
-        )
-        
-        # Wrist joint
-        self.wrist = Entity(
-            parent=self.forearm,
-            model='sphere',
-            texture=self.gold_metal,
-            color=color.gold,
-            scale=0.2,
-            position=(0, -0.55, 0),
-            shader=lit_with_shadows_shader
-        )
-        
-        self.hand = Entity(
-            parent=self.wrist,
-            model='cube',
-            texture=self.red_metal,
-            color=color.rgb(200, 50, 50),
-            scale=(0.4, 0.4, 0.4),
-            position=(0, -0.2, 0),
-            rotation=(0, 0, 0),
-            shader=lit_with_shadows_shader
-        )
-        
-        # Palm with repulsor
-        self.palm = Entity(
-            parent=self.hand,
-            model='cube',
-            texture=self.gold_metal,
-            color=color.gold,
-            scale=(0.35, 0.2, 0.5),
-            position=(0, 0, 0.3),
-            rotation=(0, 0, 0),
-            shader=lit_with_shadows_shader
-        )
-        
-        # Fingers with proper hierarchy
-        self.create_fingers()
-        
-        # Repulsor system
-        self.setup_repulsor()
-        
-        # Hand tracking
-        self.setup_hand_tracking()
-        
-        # Animation state
-        self.setup_animation_state()
+        self.time = 0
+        self.pose_mode = 'open'
+        self.repulsor_power = 0.0
 
-    def create_fingers(self):
-        # Thumb
-        self.thumb_base = Entity(
-            parent=self.hand,
-            model='cube',
-            texture=self.red_metal,
-            color=color.rgb(200, 50, 50),
-            scale=(0.15, 0.15, 0.15),
-            position=(-0.2, 0, 0.1),
-            rotation=(0, 0, -20),
-            shader=lit_with_shadows_shader
-        )
+    def create_sphere(self, center, radius, resolution=12):
+        """Create a sphere for rounded parts"""
+        phi = np.linspace(0, np.pi, resolution)
+        theta = np.linspace(0, 2*np.pi, resolution)
+        phi, theta = np.meshgrid(phi, theta)
         
-        self.thumb_mid = Entity(
-            parent=self.thumb_base,
-            model='cube',
-            texture=self.red_metal,
-            scale=(0.9, 0.9, 0.9),
-            position=(0, 0, 0.15),
-            rotation=(0, 0, 0),
-            shader=lit_with_shadows_shader
-        )
+        x = center[0] + radius * np.sin(phi) * np.cos(theta)
+        y = center[1] + radius * np.sin(phi) * np.sin(theta)
+        z = center[2] + radius * np.cos(phi)
         
-        self.thumb_tip = Entity(
-            parent=self.thumb_mid,
-            model='cube',
-            texture=self.red_metal,
-            scale=(0.9, 0.9, 0.9),
-            position=(0, 0, 0.15),
-            rotation=(0, 0, 0),
-            shader=lit_with_shadows_shader
-        )
+        vertices = []
+        faces = []
         
-        # Other fingers (index, middle, ring, pinky)
-        finger_positions = [
-            (0.1, -0.1, 0.2),  # index
-            (0.0, -0.15, 0.2),  # middle
-            (-0.1, -0.1, 0.2),  # ring
-            (-0.2, -0.05, 0.2)  # pinky
+        for i in range(resolution-1):
+            for j in range(resolution-1):
+                vertices.extend([
+                    [x[i,j], y[i,j], z[i,j]],
+                    [x[i+1,j], y[i+1,j], z[i+1,j]],
+                    [x[i,j+1], y[i,j+1], z[i,j+1]],
+                    [x[i+1,j+1], y[i+1,j+1], z[i+1,j+1]]
+                ])
+                
+                base = len(vertices) - 4
+                faces.extend([
+                    [base, base+1, base+2],
+                    [base+1, base+3, base+2]
+                ])
+        
+        return vertices, faces
+
+    def create_rounded_box(self, center, size, corner_radius=0.1):
+        """Create Iron Man style rounded rectangular segments"""
+        cx, cy, cz = center
+        sx, sy, sz = size
+        
+        vertices = []
+        faces = []
+        
+        # Create main box with rounded corners
+        corners = [
+            [-sx/2, -sy/2, -sz/2], [sx/2, -sy/2, -sz/2],
+            [sx/2, sy/2, -sz/2], [-sx/2, sy/2, -sz/2],
+            [-sx/2, -sy/2, sz/2], [sx/2, -sy/2, sz/2],
+            [sx/2, sy/2, sz/2], [-sx/2, sy/2, sz/2]
         ]
         
-        self.fingers = []
-        for i, pos in enumerate(finger_positions):
-            base = Entity(
-                parent=self.hand,
-                model='cube',
-                texture=self.red_metal,
-                scale=(0.1, 0.1, 0.1),
-                position=pos,
-                rotation=(0, 0, 0),
-                shader=lit_with_shadows_shader
-            )
-            
-            mid = Entity(
-                parent=base,
-                model='cube',
-                texture=self.red_metal,
-                scale=(0.9, 0.9, 0.9),
-                position=(0, 0, 0.1),
-                rotation=(0, 0, 0),
-                shader=lit_with_shadows_shader
-            )
-            
-            tip = Entity(
-                parent=mid,
-                model='cube',
-                texture=self.red_metal,
-                scale=(0.9, 0.9, 0.9),
-                position=(0, 0, 0.1),
-                rotation=(0, 0, 0),
-                shader=lit_with_shadows_shader
-            )
-            
-            self.fingers.append((base, mid, tip))
+        # Add slight curve to make it more organic
+        for i, corner in enumerate(corners):
+            x, y, z = corner
+            # Add subtle curvature
+            curve_factor = 0.95
+            if abs(x) > sx/4: x *= curve_factor
+            if abs(y) > sy/4: y *= curve_factor
+            vertices.append([cx + x, cy + y, cz + z])
+        
+        # Define faces for the box
+        box_faces = [
+            [0,1,2,3], [4,7,6,5], [0,4,5,1],  # bottom, top, front
+            [2,6,7,3], [0,3,7,4], [1,5,6,2]   # back, left, right
+        ]
+        
+        # Convert quads to triangles
+        for face in box_faces:
+            faces.extend([[face[0], face[1], face[2]], [face[0], face[2], face[3]]])
+        
+        return vertices, faces
 
-    def setup_repulsor(self):
+    def create_finger_segment(self, start_pos, end_pos, thickness, taper=0.9):
+        """Create accurate Iron Man finger segment with proper proportions"""
+        start = np.array(start_pos)
+        end = np.array(end_pos)
+        direction = end - start
+        length = np.linalg.norm(direction)
+        
+        if length == 0:
+            return [], []
+        
+        direction = direction / length
+        
+        # Create perpendicular vectors
+        if abs(direction[2]) < 0.9:
+            perp1 = np.cross(direction, [0, 0, 1])
+        else:
+            perp1 = np.cross(direction, [1, 0, 0])
+        perp1 = perp1 / np.linalg.norm(perp1)
+        perp2 = np.cross(direction, perp1)
+        
+        segments = 8
+        vertices = []
+        faces = []
+        
+        for i in range(segments + 1):
+            t = i / segments
+            pos = start + t * direction * length
+            radius = thickness * (1 - t * (1 - taper))
+            
+            # Create octagonal cross-section for Iron Man look
+            for j in range(8):
+                angle = 2 * np.pi * j / 8
+                offset = radius * (np.cos(angle) * perp1 + np.sin(angle) * perp2)
+                # Flatten slightly for more mechanical look
+                if j % 2 == 1:
+                    offset *= 0.85
+                vertices.append(pos + offset)
+        
+        # Create faces
+        for i in range(segments):
+            for j in range(8):
+                next_j = (j + 1) % 8
+                v1 = i * 8 + j
+                v2 = i * 8 + next_j
+                v3 = (i + 1) * 8 + next_j
+                v4 = (i + 1) * 8 + j
+                
+                faces.extend([[v1, v2, v3], [v1, v3, v4]])
+        
+        return vertices, faces
+
+    def create_knuckle_joint(self, position, size):
+        """Create Iron Man style knuckle joints"""
+        vertices, faces = self.create_rounded_box(position, [size*1.2, size*1.2, size*0.8])
+        
+        # Add joint details
+        detail_vertices, detail_faces = self.create_sphere(position, size*0.3, 6)
+        
+        offset = len(vertices)
+        for face in detail_faces:
+            faces.append([face[0] + offset, face[1] + offset, face[2] + offset])
+        vertices.extend(detail_vertices)
+        
+        return vertices, faces
+
+    def create_palm_assembly(self):
+        """Create accurate Iron Man palm with repulsor"""
+        vertices = []
+        faces = []
+        colors = []
+        
+        # Main palm - larger and more proportional
+        palm_verts, palm_faces = self.create_rounded_box([0, 0, 0], [4.5, 3.5, 1.2])
+        vertices.extend(palm_verts)
+        faces.extend(palm_faces)
+        colors.extend([[0.698, 0.133, 0.133]] * len(palm_verts))  # Deep red
+        
+        # Gold accent strips
+        for i in range(3):
+            y_pos = -1.2 + i * 1.2
+            strip_verts, strip_faces = self.create_rounded_box([0, y_pos, 0.1], [4.2, 0.3, 0.2])
+            offset = len(vertices)
+            for face in strip_faces:
+                faces.append([face[0] + offset, face[1] + offset, face[2] + offset])
+            vertices.extend(strip_verts)
+            colors.extend([[1.0, 0.843, 0.0]] * len(strip_verts))  # Gold
+        
+        # Repulsor housing in center
+        repulsor_verts, repulsor_faces = self.create_sphere([0, 0, 0.4], 0.6, 12)
+        offset = len(vertices)
+        for face in repulsor_faces:
+            faces.append([face[0] + offset, face[1] + offset, face[2] + offset])
+        vertices.extend(repulsor_verts)
+        colors.extend([[0.267, 0.267, 0.267]] * len(repulsor_verts))  # Gunmetal
+        
         # Repulsor core
-        self.repulsor = Entity(
-            parent=self.palm,
-            model='circle',
-            texture=self.blue_energy,
-            color=color.rgba(0, 150, 255, 200),
-            scale=0.3,
-            position=(0, 0, 0.3),
-            rotation=(90, 0, 0),
-            shader=lit_with_shadows_shader
-        )
+        if self.repulsor_power > 0:
+            core_verts, core_faces = self.create_sphere([0, 0, 0.5], 0.4 * self.repulsor_power, 8)
+            offset = len(vertices)
+            for face in core_faces:
+                faces.append([face[0] + offset, face[1] + offset, face[2] + offset])
+            vertices.extend(core_verts)
+            colors.extend([[0.0, 0.749, 1.0]] * len(core_verts))  # Blue glow
         
-        # Energy glow
-        self.repulsor_glow = Entity(
-            parent=self.repulsor,
-            model='circle',
-            color=color.rgba(0, 100, 255, 100),
-            scale=1.5,
-            double_sided=True,
-            shader=lit_with_shadows_shader
-        )
+        # Side armor panels
+        for side in [-1, 1]:
+            panel_verts, panel_faces = self.create_rounded_box([side * 2.0, 0, 0], [0.8, 3.0, 1.0])
+            offset = len(vertices)
+            for face in panel_faces:
+                faces.append([face[0] + offset, face[1] + offset, face[2] + offset])
+            vertices.extend(panel_verts)
+            colors.extend([[0.545, 0.0, 0.0]] * len(panel_verts))  # Dark red
         
-        # Lighting
-        self.repulsor_light = PointLight(
-            parent=self.repulsor,
-            color=color.cyan,
-            shadows=False,
-            position=(0, 0, 0)
-        )
-        
-        # State
-        self.repulsor_charging = False
-        self.repulsor_charge_time = 0
-        self.repulsor_cooldown = 0
-        self.energy_level = 0
+        return vertices, faces, colors
 
-    def setup_hand_tracking(self):
-        self.hand_landmarks = None
-        self.cap = cv2.VideoCapture(0)
-        self.hands = mp_hands.Hands(
-            min_detection_confidence=0.8,
-            min_tracking_confidence=0.8,
-            max_num_hands=1
-        )
+    def create_complete_finger(self, finger_name, base_pos, joints_angles):
+        """Create a complete Iron Man finger with proper segments"""
+        vertices = []
+        faces = []
+        colors = []
+        
+        # Iron Man finger proportions
+        if finger_name == 'thumb':
+            lengths = [1.2, 1.0, 0.8]
+            thickness = [0.35, 0.32, 0.28]
+            base_angles = [0.6, 0, -0.3]  # Thumb positioning
+        elif finger_name == 'pinky':
+            lengths = [1.0, 0.9, 0.7]
+            thickness = [0.28, 0.25, 0.22]
+            base_angles = [0, 0, 0]
+        else:
+            lengths = [1.4, 1.2, 0.9]
+            thickness = [0.32, 0.29, 0.25]
+            base_angles = [0, 0, 0]
+        
+        current_pos = np.array(base_pos)
+        current_direction = np.array([0, 1, 0])  # Default pointing up
+        
+        for i, (length, thick) in enumerate(zip(lengths, thickness)):
+            # Apply joint rotation
+            angle = joints_angles[i] + base_angles[i]
+            
+            # Calculate rotation
+            cos_a, sin_a = np.cos(angle), np.sin(angle)
+            rotation_matrix = np.array([
+                [cos_a, -sin_a, 0],
+                [sin_a, cos_a, 0],
+                [0, 0, 1]
+            ])
+            
+            current_direction = rotation_matrix @ current_direction
+            end_pos = current_pos + current_direction * length
+            
+            # Create finger segment
+            seg_verts, seg_faces = self.create_finger_segment(current_pos, end_pos, thick)
+            
+            # Add knuckle joint at the start
+            if i < len(lengths) - 1:  # Don't add joint at fingertip
+                joint_verts, joint_faces = self.create_knuckle_joint(current_pos, thick * 0.8)
+                
+                # Add joint
+                offset = len(vertices)
+                for face in joint_faces:
+                    faces.append([face[0] + offset, face[1] + offset, face[2] + offset])
+                vertices.extend(joint_verts)
+                colors.extend([[0.267, 0.267, 0.267]] * len(joint_verts))  # Gunmetal joints
+            
+            # Add segment
+            offset = len(vertices)
+            for face in seg_faces:
+                faces.append([face[0] + offset, face[1] + offset, face[2] + offset])
+            vertices.extend(seg_verts)
+            
+            # Alternate red and gold for Iron Man look
+            if i % 2 == 0:
+                colors.extend([[0.698, 0.133, 0.133]] * len(seg_verts))  # Red
+            else:
+                colors.extend([[1.0, 0.843, 0.0]] * len(seg_verts))  # Gold
+            
+            current_pos = end_pos
+        
+        return vertices, faces, colors
 
-    def setup_animation_state(self):
-        # Target rotations for smooth animation
-        self.target_rotations = {
-            'upper_arm': Vec3(0, 0, 0),
-            'elbow': Vec3(0, 0, 0),
-            'wrist': Vec3(0, 0, 0),
-            'hand': Vec3(0, 0, 0),
-            'thumb': [Vec3(0, 0, -20), Vec3(0, 0, 0), Vec3(0, 0, 0)],
-            'fingers': [
-                [Vec3(0, 0, 0), Vec3(0, 0, 0), Vec3(0, 0, 0)] for _ in range(4)
-            ]
+    def create_wrist_assembly(self):
+        """Create detailed Iron Man wrist with proper proportions"""
+        vertices = []
+        faces = []
+        colors = []
+        
+        # Main wrist cylinder
+        wrist_verts, wrist_faces = self.create_rounded_box([0, 0, -2.5], [2.8, 2.8, 3.0])
+        vertices.extend(wrist_verts)
+        faces.extend(wrist_faces)
+        colors.extend([[0.545, 0.0, 0.0]] * len(wrist_verts))  # Dark red
+        
+        # Gold wrist bands
+        for z_pos in [-3.5, -1.5]:
+            band_verts, band_faces = self.create_rounded_box([0, 0, z_pos], [3.0, 3.0, 0.4])
+            offset = len(vertices)
+            for face in band_faces:
+                faces.append([face[0] + offset, face[1] + offset, face[2] + offset])
+            vertices.extend(band_verts)
+            colors.extend([[1.0, 0.843, 0.0]] * len(band_verts))  # Gold
+        
+        # Mechanical details
+        for angle in [0, np.pi/2, np.pi, 3*np.pi/2]:
+            x_pos = 1.6 * np.cos(angle)
+            y_pos = 1.6 * np.sin(angle)
+            detail_verts, detail_faces = self.create_rounded_box([x_pos, y_pos, -2.5], [0.3, 0.3, 2.5])
+            offset = len(vertices)
+            for face in detail_faces:
+                faces.append([face[0] + offset, face[1] + offset, face[2] + offset])
+            vertices.extend(detail_verts)
+            colors.extend([[0.267, 0.267, 0.267]] * len(detail_verts))  # Gunmetal
+        
+        return vertices, faces, colors
+
+    def set_pose(self, pose_name):
+        """Set realistic Iron Man poses"""
+        poses = {
+            'open': {
+                'thumb': [0.3, 0.1, 0.0],
+                'index': [0.0, 0.0, 0.0],
+                'middle': [0.0, 0.0, 0.0],
+                'ring': [0.0, 0.0, 0.0],
+                'pinky': [0.0, 0.0, 0.0]
+            },
+            'fist': {
+                'thumb': [0.8, 0.9, 0.7],
+                'index': [1.2, 1.4, 1.0],
+                'middle': [1.2, 1.4, 1.0],
+                'ring': [1.2, 1.4, 1.0],
+                'pinky': [1.0, 1.2, 0.8]
+            },
+            'point': {
+                'thumb': [0.5, 0.3, 0.1],
+                'index': [0.0, 0.0, 0.0],
+                'middle': [1.2, 1.4, 1.0],
+                'ring': [1.2, 1.4, 1.0],
+                'pinky': [1.0, 1.2, 0.8]
+            },
+            'repulsor': {
+                'thumb': [0.6, 0.4, 0.2],
+                'index': [0.3, 0.2, 0.1],
+                'middle': [0.3, 0.2, 0.1],
+                'ring': [0.3, 0.2, 0.1],
+                'pinky': [0.4, 0.3, 0.2]
+            }
         }
         
-        # Current rotations for interpolation
-        self.current_rotations = {
-            'upper_arm': Vec3(0, 0, 0),
-            'elbow': Vec3(0, 0, 0),
-            'wrist': Vec3(0, 0, 0),
-            'hand': Vec3(0, 0, 0),
-            'thumb': [Vec3(0, 0, -20), Vec3(0, 0, 0), Vec3(0, 0, 0)],
-            'fingers': [
-                [Vec3(0, 0, 0), Vec3(0, 0, 0), Vec3(0, 0, 0)] for _ in range(4)
-            ]
+        if pose_name in poses:
+            for finger, angles in poses[pose_name].items():
+                self.joints[finger] = angles
+            
+            if pose_name == 'repulsor':
+                self.repulsor_power = 0.8
+            else:
+                self.repulsor_power = 0.0
+
+    def assemble_hand(self):
+        """Assemble the complete Iron Man hand"""
+        all_vertices = []
+        all_faces = []
+        all_colors = []
+        
+        # Create palm
+        palm_verts, palm_faces, palm_colors = self.create_palm_assembly()
+        all_vertices.extend(palm_verts)
+        all_faces.extend(palm_faces)
+        all_colors.extend(palm_colors)
+        
+        # Finger positions - accurate to Iron Man proportions
+        finger_positions = {
+            'thumb': [-1.8, -1.5, 0.2],
+            'index': [1.0, 2.2, 0.1],
+            'middle': [0.3, 2.3, 0.1],
+            'ring': [-0.4, 2.2, 0.1],
+            'pinky': [-1.1, 1.8, 0.0]
         }
         
-        self.rotation_speed = 30  # Slower for smoother movement
-
-    def update(self):
-        # Process hand tracking
-        self.process_hand_input()
+        # Create all fingers
+        for finger_name, base_pos in finger_positions.items():
+            finger_verts, finger_faces, finger_colors = self.create_complete_finger(
+                finger_name, base_pos, self.joints[finger_name]
+            )
+            
+            # Offset faces for new vertices
+            offset = len(all_vertices)
+            for face in finger_faces:
+                all_faces.append([face[0] + offset, face[1] + offset, face[2] + offset])
+            
+            all_vertices.extend(finger_verts)
+            all_colors.extend(finger_colors)
         
-        # Animate arm
-        self.animate_arm()
+        # Create wrist
+        wrist_verts, wrist_faces, wrist_colors = self.create_wrist_assembly()
+        offset = len(all_vertices)
+        for face in wrist_faces:
+            all_faces.append([face[0] + offset, face[1] + offset, face[2] + offset])
         
-        # Handle repulsor
-        self.handle_repulsor()
+        all_vertices.extend(wrist_verts)
+        all_colors.extend(wrist_colors)
+        
+        return all_vertices, all_faces, all_colors
 
-    def process_hand_input(self):
-        success, image = self.cap.read()
-        if not success:
+    def animate_hand(self, frame):
+        """Animate the Iron Man hand through different poses"""
+        self.time = frame * 0.1
+        
+        # Cycle through poses
+        poses = ['open', 'fist', 'point', 'repulsor', 'open']
+        pose_duration = 60
+        pose_index = (frame // pose_duration) % len(poses)
+        self.set_pose(poses[pose_index])
+        
+        # Add subtle wrist movement
+        self.joints['wrist_twist'] = np.sin(frame * 0.03) * 0.2
+        
+        # Repulsor pulse effect
+        if self.pose_mode == 'repulsor':
+            self.repulsor_power = 0.6 + 0.4 * np.sin(frame * 0.4)
+
+def create_iron_man_hand():
+    """Main function to create the Iron Man hand visualization"""
+    hand = AccurateIronManHand()
+    
+    fig = plt.figure(figsize=(14, 10), facecolor='black')
+    ax = fig.add_subplot(111, projection='3d')
+    ax.set_facecolor('black')
+    
+    def animate(frame):
+        ax.clear()
+        ax.set_facecolor('black')
+        
+        # Update hand animation
+        hand.animate_hand(frame)
+        vertices, faces, colors = hand.assemble_hand()
+        
+        if not faces:
             return
         
-        # Process image
-        image = cv2.cvtColor(cv2.flip(image, 1), cv2.COLOR_BGR2RGB)
-        image.flags.writeable = False
-        results = self.hands.process(image)
-        image.flags.writeable = True
+        # Create 3D polygon collection
+        polygons = []
+        face_colors = []
         
-        if results.multi_hand_landmarks:
-            self.hand_landmarks = results.multi_hand_landmarks[0]
-            self.update_arm_pose()
-
-    def update_arm_pose(self):
-        landmarks = self.hand_landmarks.landmark
+        for i, face in enumerate(faces):
+            if len(face) >= 3 and all(idx < len(vertices) for idx in face):
+                face_verts = [vertices[idx] for idx in face[:3]]
+                polygons.append(face_verts)
+                
+                # Get color for this face
+                if face[0] < len(colors):
+                    face_colors.append(colors[face[0]])
+                else:
+                    face_colors.append([0.7, 0.1, 0.1])  # Default red
         
-        # Get key points
-        wrist = landmarks[0]
-        elbow = landmarks[13]
-        middle_tip = landmarks[12]
-        thumb_tip = landmarks[4]
-        index_tip = landmarks[8]
-        pinky_tip = landmarks[20]
-        
-        # Calculate arm rotations with constraints
-        upper_arm_rot_x = clamp((elbow.y - wrist.y) * 90, -90, 90)
-        upper_arm_rot_y = clamp((elbow.x - wrist.x) * -90, -90, 90)
-        
-        forearm_rot_x = clamp((middle_tip.y - wrist.y) * 90 - upper_arm_rot_x, -90, 90)
-        forearm_rot_y = clamp((middle_tip.x - wrist.x) * -90 - upper_arm_rot_y, -90, 90)
-        
-        hand_rot_y = clamp((pinky_tip.x - index_tip.x) * -45, -45, 45)
-        hand_rot_z = clamp((wrist.y - middle_tip.y) * -45, -45, 45)
-        
-        # Update target rotations
-        self.target_rotations['upper_arm'] = Vec3(upper_arm_rot_x, upper_arm_rot_y, 0)
-        self.target_rotations['elbow'] = Vec3(forearm_rot_x, forearm_rot_y, 0)
-        self.target_rotations['wrist'] = Vec3(0, hand_rot_y, hand_rot_z)
-        
-        # Update finger rotations
-        self.update_finger_rotations()
-
-    def update_finger_rotations(self):
-        landmarks = self.hand_landmarks.landmark
-        
-        # Thumb rotations
-        thumb_rot_z = clamp((landmarks[4].x - landmarks[2].x) * -90 - 20, -90, 90)
-        self.target_rotations['thumb'][0] = Vec3(0, 0, thumb_rot_z)
-        self.target_rotations['thumb'][1] = Vec3(0, 0, thumb_rot_z * 0.7)
-        self.target_rotations['thumb'][2] = Vec3(0, 0, thumb_rot_z * 0.5)
-        
-        # Other fingers
-        finger_joints = [
-            (8, 6, 5),   # index
-            (12, 10, 9), # middle
-            (16, 14, 13), # ring
-            (20, 18, 17)  # pinky
-        ]
-        
-        for i, (tip, pip, dip) in enumerate(finger_joints):
-            bend = clamp((landmarks[tip].y - landmarks[pip].y) * -90, 0, 90)
-            self.target_rotations['fingers'][i][0] = Vec3(bend * 0.3, 0, 0)
-            self.target_rotations['fingers'][i][1] = Vec3(bend * 0.7, 0, 0)
-            self.target_rotations['fingers'][i][2] = Vec3(bend, 0, 0)
-        
-        # Check for repulsor activation
-        self.check_repulsor_activation()
-
-    def check_repulsor_activation(self):
-        landmarks = self.hand_landmarks.landmark
-        
-        # Check if hand is open
-        fingers_open = all(
-            landmarks[tip].y < landmarks[tip-2].y
-            for tip in [8, 12, 16, 20]  # index, middle, ring, pinky tips
-        ) and landmarks[4].x > landmarks[2].x  # thumb not extended
-        
-        if fingers_open:
-            if not self.repulsor_charging:
-                self.start_repulsor_charge()
-            elif time.time() - self.repulsor_charge_time > 2 and self.repulsor_cooldown <= 0:
-                self.fire_repulsor()
-        else:
-            if self.repulsor_charging:
-                self.cancel_repulsor_charge()
-        
-        if self.repulsor_cooldown > 0:
-            self.repulsor_cooldown -= time.dt
-
-    def animate_arm(self):
-        # Interpolate rotations for smooth movement
-        self.animate_part(self.upper_arm, 'upper_arm')
-        self.animate_part(self.forearm, 'elbow')
-        self.animate_part(self.hand, 'wrist')
-        
-        # Animate thumb
-        for i, part in enumerate([self.thumb_base, self.thumb_mid, self.thumb_tip]):
-            self.animate_finger_part(part, 'thumb', i)
-        
-        # Animate fingers
-        for finger_idx, finger_parts in enumerate(self.fingers):
-            for part_idx, part in enumerate(finger_parts):
-                self.animate_finger_part(part, 'fingers', finger_idx, part_idx)
-
-    def animate_part(self, part, part_name):
-        current = self.current_rotations[part_name]
-        target = self.target_rotations[part_name]
-        
-        new_rot = Vec3(
-            lerp(current.x, target.x, time.dt * self.rotation_speed),
-            lerp(current.y, target.y, time.dt * self.rotation_speed),
-            lerp(current.z, target.z, time.dt * self.rotation_speed)
-        )
-        
-        # Safety check for NaN values
-        if any(math.isnan(v) for v in new_rot):
-            new_rot = Vec3(0, 0, 0)
-        
-        self.current_rotations[part_name] = new_rot
-        part.rotation = new_rot
-
-    def animate_finger_part(self, part, part_type, finger_idx, part_idx=None):
-        if part_type == 'thumb':
-            current = self.current_rotations[part_type][finger_idx]
-            target = self.target_rotations[part_type][finger_idx]
-        else:
-            current = self.current_rotations[part_type][finger_idx][part_idx]
-            target = self.target_rotations[part_type][finger_idx][part_idx]
-        
-        new_rot = Vec3(
-            lerp(current.x, target.x, time.dt * self.rotation_speed * 2),
-            lerp(current.y, target.y, time.dt * self.rotation_speed * 2),
-            lerp(current.z, target.z, time.dt * self.rotation_speed * 2)
-        )
-        
-        if any(math.isnan(v) for v in new_rot):
-            new_rot = Vec3(0, 0, 0)
-        
-        if part_type == 'thumb':
-            self.current_rotations[part_type][finger_idx] = new_rot
-        else:
-            self.current_rotations[part_type][finger_idx][part_idx] = new_rot
-        
-        part.rotation = new_rot
-
-    def start_repulsor_charge(self):
-        self.repulsor_charging = True
-        self.repulsor_charge_time = time.time()
-        
-        # Visual effects
-        self.repulsor.color = color.rgba(0, 200, 255, 255)
-        self.repulsor_glow.color = color.rgba(0, 150, 255, 150)
-        self.repulsor_light.color = color.rgba(0, 200, 255)
-
-    def cancel_repulsor_charge(self):
-        self.repulsor_charging = False
-        
-        # Reset visual effects
-        self.repulsor.color = color.rgba(0, 150, 255, 200)
-        self.repulsor_glow.color = color.rgba(0, 100, 255, 100)
-        self.repulsor_light.color = color.cyan
-        self.energy_level = 0
-
-    def fire_repulsor(self):
-        # Create blast
-        blast = RepulsorBlast(
-            position=self.repulsor.world_position,
-            direction=self.palm.forward
-        )
-        
-        # Cooldown
-        self.repulsor_cooldown = 1.0
-        self.repulsor_charging = False
-        
-        # Reset charge
-        invoke(self.cancel_repulsor_charge, delay=0.5)
-
-    def handle_repulsor(self):
-        if self.repulsor_charging:
-            # Update charge level
-            self.energy_level = clamp((time.time() - self.repulsor_charge_time) / 2.0, 0, 1)
+        if polygons:
+            # Apply wrist rotation
+            if hand.joints['wrist_twist'] != 0:
+                angle = hand.joints['wrist_twist']
+                cos_a, sin_a = np.cos(angle), np.sin(angle)
+                rotation_matrix = np.array([
+                    [cos_a, -sin_a, 0],
+                    [sin_a, cos_a, 0],
+                    [0, 0, 1]
+                ])
+                
+                # Rotate all polygons
+                rotated_polygons = []
+                for poly in polygons:
+                    rotated_poly = [rotation_matrix @ np.array(vertex) for vertex in poly]
+                    rotated_polygons.append(rotated_poly)
+                polygons = rotated_polygons
             
-            # Visual feedback
-            pulse = math.sin(time.time() * 20) * 0.1 + 1.0
-            self.repulsor_glow.scale = 1.5 + self.energy_level * pulse
-            self.repulsor_glow.color = color.rgba(
-                0, 
-                150 + int(105 * self.energy_level), 
-                255, 
-                100 + int(155 * self.energy_level)
-            )
+            # Create collection
+            collection = Poly3DCollection(polygons, facecolors=face_colors, 
+                                        edgecolors='black', linewidths=0.3, alpha=0.9)
+            ax.add_collection3d(collection)
+            
+            # Set proper limits
+            all_points = [vertex for poly in polygons for vertex in poly]
+            if all_points:
+                all_points = np.array(all_points)
+                center = np.mean(all_points, axis=0)
+                span = np.max(all_points, axis=0) - np.min(all_points, axis=0)
+                max_span = np.max(span) * 0.6
+                
+                ax.set_xlim([center[0] - max_span, center[0] + max_span])
+                ax.set_ylim([center[1] - max_span, center[1] + max_span])
+                ax.set_zlim([center[2] - max_span, center[2] + max_span])
+        
+        # Clean up axes
+        ax.set_xlabel('')
+        ax.set_ylabel('')
+        ax.set_zlabel('')
+        ax.grid(False)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_zticks([])
+        
+        # Remove panes
+        ax.xaxis.pane.fill = False
+        ax.yaxis.pane.fill = False
+        ax.zaxis.pane.fill = False
+        ax.xaxis.pane.set_edgecolor('none')
+        ax.yaxis.pane.set_edgecolor('none')
+        ax.zaxis.pane.set_edgecolor('none')
+        
+        # Set viewing angle
+        ax.view_init(elev=20, azim=frame * 1.5)
+        
+        # Add title
+        pose_names = ['OPEN', 'FIST', 'POINT', 'REPULSOR', 'OPEN']
+        pose_index = (frame // 60) % len(pose_names)
+        ax.text2D(0.02, 0.95, f"IRON MAN MARK L - {pose_names[pose_index]} MODE", 
+                 transform=ax.transAxes, color='gold', fontsize=14, fontweight='bold')
+        
+        if pose_names[pose_index] == 'REPULSOR':
+            power_level = int(hand.repulsor_power * 100)
+            ax.text2D(0.02, 0.90, f"REPULSOR POWER: {power_level}%", 
+                     transform=ax.transAxes, color='cyan', fontsize=11)
+    
+    # Create animation
+    ani = animation.FuncAnimation(fig, animate, frames=1200, interval=50, blit=False, repeat=True)
+    
+    plt.tight_layout()
+    plt.show()
+    
+    return ani
 
-app = Ursina()
-
-# Configure window
-window.title = 'Iron Man Arm'
-window.borderless = False
-window.fullscreen = False
-window.exit_button.visible = False
-window.fps_counter.enabled = True
-window.color = color.black
-
-# Setup camera
-camera.position = (0, 0, -6)
-camera.rotation = (0, 0, 0)
-
-# Create arm
-arm = IronManArm()
-arm.position = (0, -1.5, 0)
-arm.rotation_y = 180
-
-# Light
-DirectionalLight(color=color.white, direction=(1, -1, 1))
-AmbientLight(color=color.rgba(100, 100, 100, 0.1))
-
-def update():
-    arm.update()
-
-def input(key):
-    if key == 'escape':
-        application.quit()
-
-app.run()
+# Run the accurate Iron Man hand
+if __name__ == "__main__":
+    print("Creating Movie-Accurate Iron Man Hand...")
+    print("Features:")
+    print("✓ Accurate proportions and design")
+    print("✓ Proper red and gold color scheme")
+    print("✓ Realistic finger articulation")
+    print("✓ Multiple authentic poses")
+    print("✓ Animated repulsor effects")
+    print("✓ Mechanical joint details")
+    print("✓ 360° rotating camera view")
+    
+    animation = create_iron_man_hand()
